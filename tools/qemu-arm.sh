@@ -25,30 +25,46 @@ INTERACTIVE=0
 command -v qemu-system-arm >/dev/null || {
     echo "qemu-system-arm not found" >&2; exit 1; }
 
-# QEMU loads an ELF directly and takes its entry point and load addresses from
-# the headers, which saves needing a boot wrapper to place the image and set the
-# vector table. Prefer it; fall back to whatever Buildroot produced.
-KERNEL=""
-for cand in "$IMAGES/vmlinux" "$IMAGES/zImage" "$IMAGES/Image" "$IMAGES/xipImage"; do
-    [ -f "$cand" ] && { KERNEL="$cand"; break; }
-done
-[ -n "$KERNEL" ] || {
-    echo "no kernel image in $IMAGES -- run 'make qemu-arm' first" >&2
+KERNEL="$IMAGES/vmlinux"
+DTB="$IMAGES/mps2-an385.dtb"
+WRAPPER="$IMAGES/wrapper.elf"
+
+[ -f "$KERNEL" ] || {
+    echo "no vmlinux in $IMAGES -- run 'make qemu-arm' first" >&2
     ls -l "$IMAGES" 2>/dev/null || true
     exit 1
 }
+
+# Build the boot wrapper if it is missing or stale.
+#
+# A Cortex-M has no jump-to-entry reset: it reads the initial SP and the reset
+# handler from the vector table at address 0. The kernel links at 0x21008000
+# with nothing at 0, so handing QEMU vmlinux alone starts execution at address 0
+# and locks up instantly ("can't escalate 3 to HardFault", R15=00000000). The
+# wrapper is the two words that have to be at 0, plus the ARM boot protocol.
+if [ ! -f "$WRAPPER" ] || [ boot/qemu-armv7m/wrapper.S -nt "$WRAPPER" ]; then
+    echo "==> building boot wrapper"
+    arm-none-eabi-gcc -mcpu=cortex-m3 -mthumb -nostdlib -nostartfiles \
+        -T boot/qemu-armv7m/wrapper.lds -o "$WRAPPER" boot/qemu-armv7m/wrapper.S
+fi
 
 mkdir -p logs
 echo "==> $MACHINE  <-  $KERNEL"
 
 # shellcheck disable=SC2054  # the comma is inside a QEMU option value, not a separator
+# The wrapper is the -kernel, because it is what must sit at address 0. vmlinux
+# and the DTB come in as additional loader devices: an ELF places itself from
+# its program headers, and the DTB goes at 0x21000000, the 32 KiB of DRAM below
+# the kernel's text, which is where the wrapper points r2.
 QEMU_ARGS=(
     -M "$MACHINE"
-    -kernel "$KERNEL"
+    -kernel "$WRAPPER"
+    -device "loader,file=$KERNEL"
     -nographic
     -monitor none
     -semihosting-config enable=on,target=native
 )
+[ -f "$DTB" ] && QEMU_ARGS+=(-device "loader,file=$DTB,addr=0x21000000,force-raw=on")
 
 if [ "$INTERACTIVE" = 1 ]; then
     echo "    (interactive; quit with Ctrl-A X)"

@@ -44,7 +44,8 @@ See [docs/hw-findings.md](docs/hw-findings.md) F3.
 
 ## Status
 
-**Phase 1 complete.** Linux boots on this board.
+**Phase 3 complete.** Linux boots on this board (RISC-V), and an ARM NOMMU
+kernel with FDPIC userspace boots under QEMU.
 
 `tools/check.sh` — the harness, validated against known-good firmware:
 
@@ -65,6 +66,13 @@ unattended, on the master half with its PSRAM at GPIO47:
 PASS  Phase 1: RISC-V Linux booted to a shell on the master half
 ```
 
+`tools/qemu-arm.sh` — ARM NOMMU Linux 6.15, FDPIC userspace, no hardware:
+
+```
+Linux buildroot 6.15.0 #10 armv7ml GNU/Linux
+PASS  Phase 3: ARM NOMMU kernel booted to a shell under mps2-an385
+```
+
 Two hardware results shape everything after it, both in
 [docs/hw-findings.md](docs/hw-findings.md):
 
@@ -74,6 +82,9 @@ Two hardware results shape everything after it, both in
   RISC-V AMOs fault, so there is nothing to trap and emulate. The kernel will use
   interrupt-masked atomics instead — measured correct in PSRAM at 39 ns/op, about
   10 cycles. See [docs/atomics-port.md](docs/atomics-port.md).
+- **F11 — FDPIC does what F8 needed.** `/proc/self/maps` shows BusyBox's text and
+  data at independently placed addresses with a shared libc, so per-process
+  contiguous demand is a 12 kB data segment rather than a 512 kB whole binary.
 - **F8 — 8 MB runs out exactly where predicted.** The smoke-test shell cannot
   start a single external command: `binfmt_flat` needs 512 kB contiguous per
   process and the largest free run is 256 kB, because the kernel image and

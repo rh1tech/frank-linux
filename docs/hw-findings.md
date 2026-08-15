@@ -367,6 +367,76 @@ would need 800 MHz, and 800/12 is not an integer feedback divider. 252, 300 and
 `afboot-rp2350` will need all of this before it can hand a kernel a clock of its
 choosing; the working sequence is in `hwtests/xip/src/main.c`.
 
+## F11. Phase 3 passed: ARM NOMMU + FDPIC boots, and FDPIC does what F8 needed
+
+```
+[    0.000000] Linux version 6.15.0 (arm-buildroot-uclinuxfdpiceabi-gcc 14.3.0)
+[    0.000000] CPU: ARMv7-M [410fc231] revision 1 (ARMv7M)
+[    0.335624] Run /init as init process
+Welcome to Buildroot
+buildroot login: root
+~ # uname -a
+Linux buildroot 6.15.0 #10 armv7ml GNU/Linux
+```
+
+`tools/qemu-arm.sh`, no hardware. The proof that matters is `/proc/self/maps`:
+
+```
+21550000-21555000 r-xp  /lib/ld-uClibc-1.0.52.so
+21580000-215d0000 r-xp  /bin/busybox           <- text
+21600000-21652000 r-xp  /lib/libuClibc-1.0.52.so
+2170c000-2170f000 rw-p  /bin/busybox           <- data, 1.5 MB away from its text
+```
+
+Text and data at independently chosen addresses, plus a shared loader and a
+shared libc. That is the whole point: where bFLT needed **512 kB contiguous per
+process** for text and data together (F8), FDPIC needs only the **12 kB data
+segment**, and the text is shared rather than copied.
+
+### Three things that had to be got right, none of them obvious
+
+**The boot wrapper must enable the UART transmitter.** Linux's mps2 earlycon
+writes the data register but never enables TX -- it assumes a bootloader already
+did. Without that one store the entire boot log, panics included, vanishes into
+a disabled UART and the kernel looks like it never started. It had in fact been
+booting the whole time. A Cortex-M also has no jump-to-entry reset: it reads the
+initial SP and reset handler from address 0, and the kernel links at 0x21008000
+with nothing at 0, so a wrapper has to exist at all. `boot/qemu-armv7m/wrapper.S`
+is both, and `afboot-rp2350` will do the same job plus clocks and PSRAM.
+
+**`CONFIG_ARM_MPU` had to come off for this target.** QEMU's mps2-an385 is a
+Cortex-M3 with PMSAv7, whose region geometry cannot describe this memory map:
+`Kernel panic - not syncing: MPU region initialization failure! -12`. Phase 3
+proves the toolchain, the binary format and the atomics, none of which need the
+MPU. PMSAv8 gets exercised on `mps2-an505` -- a real Cortex-M33 -- and then on
+the board.
+
+**Buildroot cannot strip an FDPIC target.** `BR2_STRIP_strip` `depends on
+BR2_BINFMT_ELF`, and selecting `BR2_BINFMT_FDPIC` makes the option vanish from
+`.config` entirely -- not set to n, absent. On a normal system that is a missed
+size optimisation. On NOMMU it is a correctness bug, because ramfs needs one
+physically contiguous allocation per file:
+
+```
+warn_alloc from __alloc_frozen_pages_noprof
+__alloc_pages_noprof from ramfs_nommu_expand_for_mapping
+...
+unpack_to_rootfs from do_populate_rootfs
+```
+
+That is the kernel failing to unpack its own initramfs, because unstripped
+`libgcc_s.so.1` is 2.7 MB -- 71% of the rootfs, and an order-10 allocation.
+A post-build script doing the strip Buildroot would not:
+
+| | before | after |
+|---|---|---|
+| target tree | 3976 kB | **1080 kB** |
+| `rootfs.cpio` | 3871 kB | **902 kB** |
+| `libgcc_s.so.1` | 2765 kB | **99 kB** |
+
+Allocation warnings during boot went from present to none. For a target with
+8 MB of RAM this is not tidying, it is the difference between booting and not.
+
 ## F4. Master flash contents at project start
 
 Both halves arrived carrying an unrelated project's firmware (slave: a SID/6581
