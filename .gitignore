@@ -1,0 +1,11 @@
+# Build outputs. Buildroot's own output and download cache live in Docker
+# volumes, not here -- see the Makefile.
+build/
+logs/
+
+# Flash dumps and raw capture frames: large, and regenerated on demand.
+*.bin
+*.gray
+
+.DS_Store
+__pycache__/

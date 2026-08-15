@@ -1,0 +1,106 @@
+# Atomics without an exclusive monitor
+
+Why this exists: on the RP2350, LDREX/STREX only work in SRAM, and Linux's data
+will live in PSRAM. See [hw-findings.md](hw-findings.md) F6 for the measurement
+and F7 for the replacement.
+
+The replacement is not new code. Linux already implements every one of these
+operations with interrupts masked, for ARMv5 and earlier. The work is forcing
+those paths on a v7-M build, where `__LINUX_ARM_ARCH__` is 7 and the exclusive
+variants are selected automatically.
+
+Correctness rests entirely on `CONFIG_SMP=n`: masking interrupts stops
+preemption on this core, and nothing else runs on it. Core 1 must therefore
+never touch kernel data — anything genuinely shared with it uses a SIO hardware
+spinlock instead, which works in every memory region (F7).
+
+## Proposed Kconfig
+
+```
+config ARM_NO_EXCLUSIVES
+	bool "Target has no exclusive monitor outside SRAM"
+	depends on !SMP
+	help
+	  Select on SoCs whose exclusive monitor does not cover all of system
+	  RAM. LDREX/STREX there do not fault -- STREX simply never succeeds --
+	  so a kernel using them livelocks in the first cmpxchg retry loop with
+	  no diagnostic. Uses interrupt-masked read-modify-write instead.
+```
+
+`depends on !SMP` is the whole safety argument, expressed where the build can
+enforce it rather than in a comment.
+
+## Patch surface
+
+Smaller than it looks: three headers, and in two of them a single conditional.
+
+### 1. `arch/arm/include/asm/atomic.h`
+
+One conditional governs the entire file:
+
+```c
+#if __LINUX_ARM_ARCH__ >= 6
+    /* ATOMIC_OP / ATOMIC_OP_RETURN / ATOMIC_FETCH_OP via ldrex/strex,
+       arch_atomic_cmpxchg_relaxed, arch_atomic_fetch_add_unless */
+#else
+    /* the same macros via raw_local_irq_save() / raw_local_irq_restore() */
+#endif
+```
+
+Change the test to:
+
+```c
+#if __LINUX_ARM_ARCH__ >= 6 && !defined(CONFIG_ARM_NO_EXCLUSIVES)
+```
+
+The `#else` branch already contains `#ifdef CONFIG_SMP / #error SMP not
+supported on pre-ARMv6 CPUs`, which is exactly the invariant we need and now
+enforces itself.
+
+### 2. `arch/arm/include/asm/cmpxchg.h`
+
+Same shape, same one-line change. Covers `xchg`, `cmpxchg` and their sized
+variants.
+
+### 3. `arch/arm/include/asm/bitops.h`
+
+Different, and easy to miss. The selection here is **not** on architecture:
+
+```c
+#ifndef CONFIG_SMP
+#define ATOMIC_BITOP(name,nr,p) \
+	(__builtin_constant_p(nr) ? ____atomic_##name(nr, p) : _##name(nr,p))
+#else
+#define ATOMIC_BITOP(name,nr,p) _##name(nr,p)
+#endif
+```
+
+So even with `CONFIG_SMP=n` today, a **constant** bit number takes the
+interrupt-masked C path while a **variable** one calls `_set_bit` and friends
+from `arch/arm/lib/bitops.h` — which are ldrex/strex assembly on ARMv6+. Half of
+the bitops would quietly livelock. Force the C path outright:
+
+```c
+#if defined(CONFIG_ARM_NO_EXCLUSIVES)
+#define ATOMIC_BITOP(name,nr,p) ____atomic_##name(nr, p)
+#elif !defined(CONFIG_SMP)
+...
+```
+
+## Already fine, checked
+
+- **Spinlocks** — `arch/arm/include/asm/spinlock.h` is only used when
+  `CONFIG_SMP=y`; on UP they reduce to preempt counting.
+- **futex** — has a non-SMP variant that does not use exclusives.
+- **mutex, rwsem, refcount, percpu** — all built on `atomic_t`, so fixed by (1).
+
+## Open, to settle before Phase 4 finishes
+
+- **Userspace atomics.** The kuser helper page (`__kuser_cmpxchg` at
+  `0xffff0000`) needs an MMU and does not exist on NOMMU, so uClibc-ng must not
+  be relying on it. With `BR2_PTHREADS_NONE` — what `pi-pico2-linux` uses —
+  there is very little in userspace that needs an atomic at all. Confirm rather
+  than assume, because the failure mode is a silent livelock in a library.
+- **Whether any driver we enable open-codes ldrex.** Grep the built objects for
+  `ldrex` after the kernel links; on this configuration there should be none
+  outside `arch/arm/lib/bitops.h`, which becomes dead code.

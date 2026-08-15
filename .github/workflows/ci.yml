@@ -1,0 +1,104 @@
+#
+# frank-linux — NOMMU Linux on the FRANK Core 2 Proto board
+#
+# Copyright (c) 2026 Mikhail Matveev <xtreme@rh1.tech>
+# https://github.com/rh1tech/frank-linux
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  attribution:
+    name: Attribution
+    # Cheap and first: a commit crediting an AI must never reach main, and finding out at
+    # merge time is finding out too late. A local hook cannot do this job — it protects
+    # only whoever installed it, and never runs for a commit authored through GitHub's own
+    # web surface. This is the enforcement that actually applies to everyone.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history on a PR so every commit in the branch is inspected, not just the tip.
+          fetch-depth: 0
+
+      - name: Reject AI attribution in commit messages
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -uo pipefail
+          # An empty or all-zero BASE means there is no predecessor to diff against (first
+          # push to a branch, or a forced update). Fall back to the tip commit alone rather
+          # than re-scanning history that was already accepted.
+          if [ -z "${BASE}" ] || [ "${BASE}" = "0000000000000000000000000000000000000000" ]; then
+            range="${HEAD_SHA} -1"
+          else
+            range="${BASE}..${HEAD_SHA}"
+          fi
+          echo "Inspecting: ${range}"
+          # shellcheck disable=SC2086
+          offenders=$(git log --format='%H%x09%an <%ae>%x09%s%n%b' ${range} \
+            | grep -inE 'co-authored-by:.*(copilot|claude|chatgpt|gpt-|anthropic|openai|codex|cursor|devin|gemini|bard)|generated with \[?(claude|copilot|chatgpt)|assisted-by:|claude-session' || true)
+          if [ -n "${offenders}" ]; then
+            echo "::error::Commit messages credit an AI. Remove the trailer and amend/rebase."
+            echo "${offenders}"
+            exit 1
+          fi
+          # Authorship, not just trailers: a commit written BY a bot account counts too.
+          # shellcheck disable=SC2086
+          bots=$(git log --format='%H %an <%ae>' ${range} \
+            | grep -iE 'copilot|claude|chatgpt|anthropic|openai\[bot\]' || true)
+          if [ -n "${bots}" ]; then
+            echo "::error::Commits authored by an AI account."
+            echo "${bots}"
+            exit 1
+          fi
+
+  harness:
+    name: Harness
+    needs: attribution
+    # The parts of the test harness that need neither the board nor the capture card.
+    # That is deliberately most of it: the font loader and the HDMI text decoder are
+    # where a silent wrong answer would be most damaging, and both are testable from a
+    # synthetic frame. The bench-dependent halves (flash, console, capture) are covered
+    # by tools/check.sh on a machine with the hardware attached.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Screen decoder round-trip
+        # Renders a frame from a Protea font sheet and requires the text back exactly,
+        # at 1:1 and 2x, for two fonts of different geometry.
+        run: python3 tools/test_screen.py
+
+      - name: Shell syntax
+        run: |
+          for f in tools/*.sh .githooks/*; do
+            bash -n "$f" || exit 1
+          done
+          echo "all shell scripts parse"
+
+      - name: Python syntax
+        run: python3 -m compileall -q tools/
+
+  shellcheck:
+    name: ShellCheck
+    needs: attribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run ShellCheck
+        run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck
+          # SC1091: probe.sh is sourced by path and shellcheck cannot follow it here.
+          shellcheck -e SC1091 tools/*.sh .githooks/commit-msg

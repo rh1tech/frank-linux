@@ -1,0 +1,42 @@
+--- a/board/raspberrypi/raspberrypi-pico2/post-image.sh
++++ b/board/raspberrypi/raspberrypi-pico2/post-image.sh
+@@ -1,15 +1,32 @@
+ #!/bin/sh
++#
++# Assemble bootloader + DTB + kernel into one flash image.
++#
++# Diverges from upstream in two ways, both because of how we flash.
++#
++# We program over SWD with openocd, which takes the raw .bin and an address, so
++# the UF2 conversion is optional here rather than the point. picotool is not
++# installed in the build container, and building it there just to produce an
++# artifact we do not use would be a lot of container for nothing.
++#
++# Upstream's last two lines are `tput smso` / `tput rmso` around the flashing
++# hint. With no TERM set -- which is the normal state inside a container -- tput
++# exits non-zero, and because it is the last command in the script that becomes
++# the script's exit status. Buildroot then fails target-post-image *after* the
++# image has been written successfully, which is a confusing way to lose a build
++# that actually worked.
++
++set -e
+ shift
+ support/scripts/genimage.sh "$@"
+ 
+-if picotool version > /dev/null; then
++if command -v picotool > /dev/null 2>&1; then
+ 	picotool uf2 convert "${BINARIES_DIR}/flash-image.bin" \
+ 		"${BINARIES_DIR}/flash-image.uf2" --family rp2350-riscv
++	echo "post-image: wrote flash-image.bin and flash-image.uf2"
+ else
+-	echo "picotool not found, skipping uf2 conversion"
+-	echo "Please run \`picotool uf2 convert ${BINARIES_DIR}/flash-image.bin \
+-		${BINARIES_DIR}/flash-image.uf2 --family rp2350-riscv\` insead."
++	echo "post-image: wrote flash-image.bin (no picotool; UF2 skipped)"
++	echo "post-image: flash with 'tools/flash-smoke.sh' over SWD"
+ fi
+-tput smso 2>/dev/null
+-echo "Run \`picotool load -fu ${BINARIES_DIR}/flash-image.uf2\` to flash to pi pico2."
+-tput rmso 2>/dev/null
++
++exit 0

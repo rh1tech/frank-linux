@@ -1,0 +1,61 @@
+--- a/package/pico2-bootloader/bootloader/src/main.c
++++ b/package/pico2-bootloader/bootloader/src/main.c
+@@ -27,8 +27,22 @@
+ #include "string_local.h"
+ #endif
+ 
++/*
++ * Board pins. Overridable from the buildroot package so one source tree serves
++ * both halves of the FRANK Core 2 Proto: the master (RP2350B) puts its 8 MB
++ * PSRAM chip select on GPIO47, the slave (RP2350A) on GPIO0. Upstream's default
++ * of 19 is the SparkFun Pro Micro's and is wrong for either.
++ *
++ * set_pinfunc()/set_config() index IO_BANK0 and PADS_BANK0 linearly, and those
++ * register files are contiguous across all 48 pins on the B package, so a pin
++ * above 31 needs no special handling.
++ */
++#ifndef LED_PIN
+ #define LED_PIN			2
+-#define RP2350_XIP_CSI_PIN	19
++#endif
++#ifndef RP2350_XIP_CSI_PIN
++#define RP2350_XIP_CSI_PIN	47
++#endif
+ 
+ #define PSRAM_LOCATION (0x11000000U)
+ 
+--- a/package/pico2-bootloader/bootloader/Makefile
++++ b/package/pico2-bootloader/bootloader/Makefile
+@@ -22,6 +22,8 @@
+ 		-Isrc \
+ 		-DPRINTF_INCLUDE_CONFIG_H
+ 
++CFLAGS += $(EXTRA_CFLAGS)
++
+ ASFLAGS := $(CFLAGS)
+ LDFLAGS := -nostdlib -Wl,--gc-sections
+ 
+--- a/package/pico2-bootloader/pico2-bootloader.mk
++++ b/package/pico2-bootloader/pico2-bootloader.mk
+@@ -11,8 +11,20 @@
+ PICO2_BOOTLOADER_INSTALL_IMAGES = YES
+ PICO2_BOOTLOADER_INSTALL_TARGET = NO
+ 
++# FRANK Core 2 Proto pin map. The master (RP2350B, U3) carries its 8 MB PSRAM
++# chip select on GPIO47; the slave (RP2350A, U6) on GPIO0. Upstream defaults to
++# 19, which is the SparkFun Pro Micro's pin and matches neither half.
++#
++# The smoke test runs on the master because that is the half whose UART console
++# is wired to a probe -- and upstream's console is already UART0 on GPIO0/1,
++# which is exactly the master's J2 header. On the slave, GPIO0 is the PSRAM
++# chip select, so UART0 is not even available there.
++PICO2_BOOTLOADER_PSRAM_CS_PIN ?= 47
++
+ define PICO2_BOOTLOADER_BUILD_CMDS
+-	$(MAKE) CROSS_COMPILE="$(TARGET_CROSS)" -C $(@D) bootloader.bin
++	$(MAKE) CROSS_COMPILE="$(TARGET_CROSS)" \
++		EXTRA_CFLAGS="-DRP2350_XIP_CSI_PIN=$(PICO2_BOOTLOADER_PSRAM_CS_PIN)" \
++		-C $(@D) bootloader.bin
+ endef
+ 
+ define PICO2_BOOTLOADER_INSTALL_IMAGES_CMDS
