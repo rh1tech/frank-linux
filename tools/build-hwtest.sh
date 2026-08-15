@@ -14,7 +14,7 @@ REPO="$(cd "$HERE/.." && pwd)"
 
 NAME="${1:?usage: build-hwtest.sh <name> [--clean]}"
 SRC="$REPO/hwtests/$NAME"
-BLD="$REPO/build/hwtest-$NAME"
+BLD="$REPO/build/hwtest-$NAME${FRANK_HALF:+-$FRANK_HALF}"
 [ -d "$SRC" ] || { echo "no such hwtest: $SRC" >&2; exit 1; }
 [ "${2:-}" = "--clean" ] && rm -rf "$BLD"
 
@@ -33,6 +33,7 @@ fi
 
 mkdir -p "$BLD"
 cmake -S "$SRC" -B "$BLD" -DPICO_PLATFORM=rp2350 \
+      -DFRANK_HALF="${FRANK_HALF:-master}" \
       -DCPU_SPEED="$CPU_SPEED" -DPSRAM_SPEED="$PSRAM_SPEED" >/dev/null
 cmake --build "$BLD" -j"$(sysctl -n hw.ncpu 2>/dev/null || echo 4)" 2>&1 | grep -vE "^\[|^gmake" || true
 ls -l "$BLD"/hwtest-"$NAME".elf

@@ -437,6 +437,58 @@ A post-build script doing the strip Buildroot would not:
 Allocation warnings during boot went from present to none. For a target with
 8 MB of RAM this is not tidying, it is the difference between booting and not.
 
+## F12. The Phase 4 console works, proven before Linux exists
+
+Linux cannot drive the RP2350's USB controller -- there is no mainline driver --
+so the slave's console is served by **core 1** running TinyUSB CDC, with two byte
+rings in SRAM between it and core 0. `hwtests/usbring` stands core 0 in for the
+kernel and exercises the whole path on real hardware:
+
+```
+RESULT ring base=0x20080000 magic=0x474e5246 version=1
+RESULT core1 alive_delta=233317 running=1
+```
+
+Core 1 turned over **233,317 service iterations in 200 ms**. The slave's J9 port
+enumerates as its own device, addressable by serial like every other instrument
+on the bench rather than being a third anonymous "Pico":
+
+```
+FRANK Linux console   FRANKLINUX01   /dev/cu.usbmodemFRANKLINUX011
+```
+
+And the round trip carries bytes both ways --
+`USB -> core1 -> rx ring -> core0 -> tx ring -> core1 -> USB`:
+
+```
+sent:     'echo-test-12345\r\n'
+received: 'echo-test-12345\r\n'
+```
+
+So the Linux side is a ring-buffer tty and nothing more. No USB in the kernel at
+all, which was the point.
+
+**No locks and no atomics anywhere in the ring**, deliberately. Each ring has one
+producer and one consumer, permanently, on different cores -- and a
+single-producer/single-consumer ring needs only ordering, not mutual exclusion.
+That is necessary rather than elegant: the kernel runs with interrupt-masked
+atomics (F6/F7), which are atomic only against its own core and would protect
+nothing against core 1. SIO hardware spinlocks remain the fallback if some later
+structure genuinely needs cross-core exclusion.
+
+### Known issue: output written before a terminal attaches is lost
+
+The boot banner did not arrive. Core 1 only drains the TX ring while
+`tud_cdc_connected()`, and macOS appears to assert DTR briefly during
+enumeration -- long enough to drain the ring into a port nobody is reading.
+
+Harmless for an echo test, not harmless for a kernel console: the boot log is
+the primary debugging artifact of Phase 4, and it is written long before anyone
+opens the port. The FRANK firmware solves the same problem with
+`PICO_STDIO_USB_CONNECTION_WITHOUT_DTR` plus a repeated banner. The ring already
+provides the buffering; core 1 needs to stop treating a transient DTR as a
+reader. To fix with the Linux driver.
+
 ## F4. Master flash contents at project start
 
 Both halves arrived carrying an unrelated project's firmware (slave: a SID/6581

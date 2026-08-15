@@ -1,5 +1,5 @@
 #
-# Phase 2 hardware test: XIP execution, cache coherence and interrupt latency.
+# Phase 2 hardware test: RP2350 exclusive monitor behaviour outside SRAM.
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
@@ -15,50 +15,53 @@ set(PICO_BOARD "frank_core2_${FRANK_HALF}" CACHE STRING "Pico board type" FORCE)
 
 set(CPU_SPEED   "252" CACHE STRING "CPU clock in MHz")
 set(PSRAM_SPEED "133" CACHE STRING "PSRAM max frequency in MHz")
-set(FLASH_SPEED "66"  CACHE STRING "Flash max frequency in MHz")
 
 include(${HWTESTS_ROOT}/pico_sdk_import.cmake)
-project(hwtest-xip C CXX ASM)
+project(hwtest-usbring C CXX ASM)
 set(CMAKE_C_STANDARD 11)
 pico_sdk_init()
 
-add_executable(hwtest-xip
+add_executable(hwtest-usbring
     src/main.c
-    ${HWTESTS_ROOT}/common/psram_init.c
+    ${HWTESTS_ROOT}/../firmware/common/core1_usb.c
+    ${HWTESTS_ROOT}/../firmware/common/usb_descriptors.c
 )
 
-target_include_directories(hwtest-xip PRIVATE
+target_include_directories(hwtest-usbring PRIVATE
     src
     ${HWTESTS_ROOT}/common
+    ${HWTESTS_ROOT}/../firmware/common
 )
 
-target_compile_definitions(hwtest-xip PRIVATE
+target_compile_definitions(hwtest-usbring PRIVATE
     CPU_SPEED=${CPU_SPEED}
     PSRAM_MAX_FREQ_MHZ=${PSRAM_SPEED}
-    FLASH_MAX_FREQ_MHZ=${FLASH_SPEED}
 )
 
-# -O1. The measurement loops must not be optimised away or hoisted out of the
-# timed region, and the interrupt-latency test depends on the foreground
-# actually performing its loads rather than the compiler proving they are dead.
-target_compile_options(hwtest-xip PRIVATE -O1 -Wall -Wextra -Wno-unused-parameter)
+# -O1, not -O2 or -Os. The exclusive sequences must keep their LDREX and STREX
+# in one basic block: anything the compiler inserts between them -- a spill, a
+# call, a reordered load -- is architecturally allowed to clear the local
+# monitor, which would make a perfectly good region look like it never grants
+# an exclusive. -O1 keeps the intrinsics adjacent while still being real code.
+target_compile_options(hwtest-usbring PRIVATE -O1 -Wall -Wextra -Wno-unused-parameter)
 
-target_link_libraries(hwtest-xip
+target_link_libraries(hwtest-usbring
     pico_stdlib
     hardware_clocks
     hardware_gpio
-    hardware_dma
-    hardware_irq
     hardware_sync
     hardware_timer
     hardware_vreg
     hardware_xip_cache
+    pico_multicore
+    tinyusb_device
+    tinyusb_board
 )
 
 # Console on UART0 (J2), which is what the probe reads. USB CDC is deliberately
 # off: the board's own USB port is not the channel the harness can address by
 # role, and enumerating it would also perturb the very bandwidth we measure.
-pico_enable_stdio_uart(hwtest-xip 1)
-pico_enable_stdio_usb(hwtest-xip 0)
+pico_enable_stdio_uart(hwtest-usbring 1)
+pico_enable_stdio_usb(hwtest-usbring 0)
 
-pico_add_extra_outputs(hwtest-xip)
+pico_add_extra_outputs(hwtest-usbring)

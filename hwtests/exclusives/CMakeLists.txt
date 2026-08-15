@@ -8,7 +8,10 @@ cmake_minimum_required(VERSION 3.13)
 set(HWTESTS_ROOT ${CMAKE_CURRENT_LIST_DIR}/..)
 
 set(PICO_BOARD_HEADER_DIRS ${HWTESTS_ROOT}/boards CACHE PATH "" FORCE)
-set(PICO_BOARD "frank_core2_master" CACHE STRING "Pico board type" FORCE)
+# Which half. The two differ in package (48 vs 30 GPIOs), PSRAM chip select
+# (GPIO47 vs GPIO0) and which UART is the console.
+set(FRANK_HALF "master" CACHE STRING "master or slave")
+set(PICO_BOARD "frank_core2_${FRANK_HALF}" CACHE STRING "Pico board type" FORCE)
 
 set(CPU_SPEED   "252" CACHE STRING "CPU clock in MHz")
 set(PSRAM_SPEED "133" CACHE STRING "PSRAM max frequency in MHz")
