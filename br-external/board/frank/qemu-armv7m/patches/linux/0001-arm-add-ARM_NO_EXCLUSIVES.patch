@@ -1,0 +1,48 @@
+ARM: add CONFIG_ARM_NO_EXCLUSIVES for SoCs without a usable exclusive monitor
+
+The RP2350's exclusive monitor covers SRAM only. LDREX/STREX to any other
+region -- including the PSRAM that holds system RAM -- never succeed: measured
+0 successes in 1000 operations of 1000 retries each, cached and uncached, while
+ordinary loads and stores to the same addresses work perfectly.
+
+This is worse than a fault. RISC-V AMOs on the same silicon *do* fault, which is
+why the RISC-V port can trap and emulate them. ARM exclusives simply fail, so a
+kernel with its data there does not crash -- it livelocks in the first cmpxchg
+retry loop, with no diagnostic at all.
+
+Select this to use interrupt-masked read-modify-write instead, which is what
+Linux already does on ARMv5. It is genuinely atomic on a uniprocessor:
+interrupts off stops preemption on this core, and !SMP means there is no other.
+
+The !SMP dependency is the entire safety argument, so express it where the build
+can enforce it.
+
+--- a/arch/arm/Kconfig-nommu
++++ b/arch/arm/Kconfig-nommu
+@@ -64,3 +64,26 @@
+ 
+          If your CPU has an MPU then you should choose 'y' here unless you
+          know that you do not want to use the MPU.
++
++config ARM_NO_EXCLUSIVES
++       bool 'Target has no exclusive monitor over all of system RAM'
++       depends on !SMP
++       help
++         Select this on SoCs whose exclusive monitor does not cover the memory
++         used for system RAM.  On the RP2350, for example, LDREX/STREX work
++         only in the internal SRAM and never succeed in the external PSRAM
++         that holds system RAM.
++
++         Such a failure is silent.  STREX reports failure forever rather than
++         faulting, so a kernel using it does not crash -- it livelocks inside
++         the first cmpxchg retry loop with no diagnostic at all.  (RISC-V AMOs
++         on the same silicon do fault, which is why a RISC-V port can trap and
++         emulate them; there is nothing here to trap.)
++
++         Uses interrupt-masked read-modify-write instead, which is what Linux
++         already does on ARMv5.  That is genuinely atomic on a uniprocessor:
++         interrupts off stops preemption on this core, and !SMP means there is
++         no other core to race with.  The !SMP dependency above is the whole of
++         that argument.
++
++         If unsure, say N.

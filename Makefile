@@ -56,8 +56,9 @@ DOCKER_SHELL = docker run --rm -it \
 	-e BR2_DL_DIR=/dl \
 	-w /src $(IMAGE)
 
-.PHONY: help hooks image volumes shell check check-fast smoke-riscv \
-        smoke-riscv-config smoke-riscv-flash reffw clean-smoke distclean
+.PHONY: help hooks image volumes shell check check-fast smoke-riscv qemu-arm-config \
+        smoke-riscv-config smoke-riscv-flash qemu-arm qemu-arm-run reffw \
+        clean-smoke distclean
 
 help:
 	@echo "Setup:"
@@ -72,6 +73,8 @@ help:
 	@echo "  make image           build the build container"
 	@echo "  make shell           interactive shell in the container"
 	@echo "  make smoke-riscv     Phase 1: RISC-V Linux for the master half"
+	@echo "  make qemu-arm        Phase 3: ARM NOMMU + FDPIC kernel for QEMU"
+	@echo "  make qemu-arm-run    boot it under qemu-system-arm"
 	@echo "  make smoke-riscv-flash   flash it and wait for a shell prompt"
 
 # Attribution protection. The commit-msg hook refuses a message crediting an AI;
@@ -154,6 +157,30 @@ smoke-riscv: volumes
 
 smoke-riscv-flash:
 	@./tools/flash-smoke.sh
+
+# ------------------------------------------- Phase 3: ARM under QEMU ----
+#
+# The toolchain, C library, binary format and atomics patch get proven here,
+# with no hardware in the loop. QEMU's mps2-an385/an386 are the Cortex-M3/M4
+# boards Linux already supports; mps2-an505 is a real Cortex-M33, the same
+# architecture as the RP2350, and is where PMSAv8 can be exercised before the
+# board port exists.
+
+BRARM = make -C /br O=/out/qemu-armv7m BR2_EXTERNAL=/src/br-external
+
+qemu-arm-config: volumes
+	$(DOCKER_RUN) sh -c '$(BRARM) frank_qemu_armv7m_defconfig'
+
+qemu-arm: volumes
+	$(DOCKER_RUN) sh -c '\
+		test -f /out/qemu-armv7m/.config || $(BRARM) frank_qemu_armv7m_defconfig; \
+		$(BRARM) -j$(JOBS) && \
+		mkdir -p /src/build/qemu-armv7m && \
+		cp /out/qemu-armv7m/images/* /src/build/qemu-armv7m/'
+	@ls -l build/qemu-armv7m/
+
+qemu-arm-run:
+	@./tools/qemu-arm.sh
 
 clean-smoke:
 	docker volume rm $(OUT_VOL) 2>/dev/null || true

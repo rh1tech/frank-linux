@@ -1,0 +1,41 @@
+# Phase 3: ARM NOMMU Linux with FDPIC userspace, under QEMU.
+#
+# No hardware involved, deliberately. This is where the toolchain, the C
+# library, the binary format and the atomics patch get proven; the board port
+# then only has to add a machine. It stays a CI target afterwards so kernel
+# changes can be bisected without the board in the loop.
+
+# Architecture. Buildroot has no cortex-m33, and it does not need one: ARMv8-M
+# Mainline is a superset of ARMv7E-M, so cortex-m4 output runs unmodified on the
+# RP2350's M33. BR2_ARM_CPU_ARMV7M is what selects BR2_ARCH_HAS_FDPIC_SUPPORT.
+BR2_arm=y
+BR2_cortex_m4=y
+
+# FDPIC, not FLAT. This is the decision F8 turned into a requirement: bFLT
+# copies each binary's text into RAM per process and needs one contiguous block
+# for text+data together, which is why the RISC-V smoke test could not start a
+# single external command in 8 MB. FDPIC separates the segments and shares one
+# libc.so across every process.
+BR2_BINFMT_FDPIC=y
+
+BR2_TOOLCHAIN_BUILDROOT_UCLIBC=y
+# The toolchain's kernel headers must match the kernel we build, and Buildroot
+# defaults to 2.6.x. Left alone it builds an entire FDPIC toolchain and then
+# refuses: "Incorrect selection of kernel headers: expected 2.6.x, got 6.15.x".
+BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_15=y
+BR2_PTHREADS_NONE=y
+BR2_OPTIMIZE_S=y
+
+# Kernel
+BR2_LINUX_KERNEL=y
+BR2_LINUX_KERNEL_CUSTOM_VERSION=y
+BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="6.15"
+BR2_LINUX_KERNEL_DEFCONFIG="mps2"
+BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_FRANK_LINUX_PATH)/board/frank/qemu-armv7m/linux.config"
+BR2_LINUX_KERNEL_DTS_SUPPORT=y
+BR2_LINUX_KERNEL_INTREE_DTS_NAME="arm/mps2-an385"
+BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_FRANK_LINUX_PATH)/board/frank/qemu-armv7m/patches"
+
+# Userspace: BusyBox in an initramfs the kernel carries itself.
+BR2_TARGET_ROOTFS_INITRAMFS=y
+# BR2_TARGET_ROOTFS_TAR is not set

@@ -1,0 +1,1 @@
+source "$BR2_EXTERNAL_FRANK_LINUX_PATH/package/Config.in"

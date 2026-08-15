@@ -1,0 +1,128 @@
+ARM: use interrupt-masked atomics when ARM_NO_EXCLUSIVES is set
+
+Three places choose the LDREX/STREX implementation, and they do not all key off
+the same thing:
+
+  atomic.h  - one conditional on __LINUX_ARM_ARCH__ governs the whole file, and
+              its #else branch is already pure C around raw_local_irq_save().
+
+  bitops.h  - keys off CONFIG_SMP, not the architecture. Even a UP build sends a
+              *variable* bit number to the ldrex/strex assembly form; only a
+              compile-time-constant bit takes the C path. Half the bitops in the
+              kernel would quietly never complete.
+
+  cmpxchg.h - cannot simply fall back. Its pre-ARMv6 path uses swp/swpb, and
+              ARMv7-M dropped SWP entirely, so that code will not even assemble
+              here. Needs a real interrupt-masked implementation.
+
+--- a/arch/arm/include/asm/atomic.h
++++ b/arch/arm/include/asm/atomic.h
+@@ -25,7 +25,7 @@
+ #define arch_atomic_read(v)	READ_ONCE((v)->counter)
+ #define arch_atomic_set(v,i)	WRITE_ONCE(((v)->counter), (i))
+ 
+-#if __LINUX_ARM_ARCH__ >= 6
++#if __LINUX_ARM_ARCH__ >= 6 && !defined(CONFIG_ARM_NO_EXCLUSIVES)
+ 
+ /*
+  * ARMv6 UP and SMP safe atomic ops.  We use load exclusive and
+--- a/arch/arm/include/asm/cmpxchg.h
++++ b/arch/arm/include/asm/cmpxchg.h
+@@ -41,7 +41,37 @@
+ 	prefetchw((const void *)ptr);
+ 
+ 	switch (size) {
+-#if __LINUX_ARM_ARCH__ >= 6
++#if defined(CONFIG_ARM_NO_EXCLUSIVES)
++	/*
++	 * No exclusive monitor, and no swp either: ARMv7-M dropped the SWP
++	 * instruction entirely, so the pre-ARMv6 path below will not even
++	 * assemble here.  Mask interrupts instead -- atomic on UP because
++	 * nothing can preempt the sequence and there is no second CPU.
++	 */
++	case 1:
++	case 2:
++	case 4: {
++		unsigned long irqflags;
++
++		raw_local_irq_save(irqflags);
++		switch (size) {
++		case 1:
++			ret = *(volatile unsigned char *)ptr;
++			*(volatile unsigned char *)ptr = x;
++			break;
++		case 2:
++			ret = *(volatile unsigned short *)ptr;
++			*(volatile unsigned short *)ptr = x;
++			break;
++		default:
++			ret = *(volatile unsigned long *)ptr;
++			*(volatile unsigned long *)ptr = x;
++			break;
++		}
++		raw_local_irq_restore(irqflags);
++		break;
++	}
++#elif __LINUX_ARM_ARCH__ >= 6
+ #ifndef CONFIG_CPU_V6 /* MIN ARCH >= V6K */
+ 	case 1:
+ 		asm volatile("@	__xchg1\n"
+@@ -162,6 +192,37 @@
+ 
+ 	prefetchw((const void *)ptr);
+ 
++#if defined(CONFIG_ARM_NO_EXCLUSIVES)
++	{
++		unsigned long irqflags;
++
++		raw_local_irq_save(irqflags);
++		switch (size) {
++		case 1:
++			oldval = *(volatile unsigned char *)ptr;
++			if (oldval == old)
++				*(volatile unsigned char *)ptr = new;
++			break;
++		case 2:
++			oldval = *(volatile unsigned short *)ptr;
++			if (oldval == old)
++				*(volatile unsigned short *)ptr = new;
++			break;
++		case 4:
++			oldval = *(volatile unsigned long *)ptr;
++			if (oldval == old)
++				*(volatile unsigned long *)ptr = new;
++			break;
++		default:
++			oldval = 0;
++			__bad_cmpxchg(ptr, size);
++		}
++		raw_local_irq_restore(irqflags);
++		(void)res;
++		return oldval;
++	}
++#endif
++
+ 	switch (size) {
+ #ifdef CONFIG_CPU_V6	/* ARCH == ARMv6 */
+ 	case 1:
+--- a/arch/arm/include/asm/bitops.h
++++ b/arch/arm/include/asm/bitops.h
+@@ -175,7 +175,17 @@
+ unsigned long _find_first_bit_be(const unsigned long *p, unsigned long size);
+ unsigned long _find_next_bit_be(const unsigned long *p, unsigned long size, unsigned long offset);
+ 
+-#ifndef CONFIG_SMP
++#if defined(CONFIG_ARM_NO_EXCLUSIVES)
++/*
++ * No usable exclusive monitor: always take the interrupt-masked C form.
++ *
++ * Note this cannot key off CONFIG_SMP like the cases below.  Even on a UP
++ * build, the _##name() assembly form is chosen whenever the bit number is not
++ * a compile-time constant, and that form is ldrex/strex.  Half the bitops in
++ * the kernel would quietly never complete.
++ */
++#define ATOMIC_BITOP(name,nr,p)		____atomic_##name(nr, p)
++#elif !defined(CONFIG_SMP)
+ /*
+  * The __* form of bitops are non-atomic and may be reordered.
+  */
