@@ -53,17 +53,32 @@ esac
 # Refusing to guess matters here -- flash XIP starts at 0x10000000 and PSRAM at
 # 0x11000000, and defaulting to either would silently write to the wrong one.
 if [ -n "$LOAD_ADDR" ]; then
-    PROGRAM_ARGS="$IMAGE $LOAD_ADDR verify reset"
+    WRITE_CMD="flash write_image erase $IMAGE $LOAD_ADDR bin"
+    VERIFY_CMD="verify_image $IMAGE $LOAD_ADDR bin"
 else
     case "$IMAGE" in
-        *.elf|*.hex) PROGRAM_ARGS="$IMAGE verify reset" ;;
+        *.elf|*.hex)
+            WRITE_CMD="flash write_image erase $IMAGE"
+            VERIFY_CMD="verify_image $IMAGE" ;;
         *) die "$IMAGE has no load address. Raw images must be given as
        file@0xADDR (flash XIP is 0x10000000)." ;;
     esac
 fi
 
-# A RISC-V image on this half leaves the ARM cores powered down; rescue back
-# into the boot ROM before doing anything that needs them.
+# Rescue first, every time.
+#
+# openocd's `program` does a `reset init`, which lets whatever is already in
+# flash start running -- and a bad image gets to reconfigure the QMI before the
+# debugger can probe it. The failure is spectacular and confusing: "QSPI Flash
+# id = 0x0c20f7 not recognised", "clearing lockup after double fault",
+# "Failed to init Arm core 0 before ROM call". The board is fine; it is simply
+# executing something that broke XIP.
+#
+# rescue_reset stops both cores in the boot ROM before any image header is read,
+# so nothing on the flash gets a chance to run. It costs about a second and it
+# makes flashing work regardless of what is currently installed -- which during
+# a kernel bring-up is most of the time.
+rescue "$ROLE"
 ensure_arm "$ROLE"
 
 echo "==> verifying $ROLE half"
@@ -78,17 +93,28 @@ echo "==> flashing $ROLE <- $IMAGE${LOAD_ADDR:+ @ $LOAD_ADDR}"
 # the new image, the chip switches to the Hazard3 cores, and re-attaching to the
 # now-powered-down M33 fails. Treating that as a flash failure would discard a
 # perfectly good write.
-LOG="$(oocd "$ROLE" "program $PROGRAM_ARGS" "exit")" || true
+# Explicit write and verify rather than openocd's `program`.
+#
+# `program` performs a `reset init` first, which boots whatever is already in
+# flash -- undoing the rescue above and handing control back to the very image
+# that may be breaking XIP. Halting the already-rescued cores and writing from
+# there never lets a stale image run at all.
+LOG="$(oocd "$ROLE" "init" "halt" "$WRITE_CMD" "$VERIFY_CMD" "exit")" || true
 
-if ! grep -q "Verified OK" <<<"$LOG"; then
+# "verified N bytes" is the success line from verify_image; "Verified OK" is
+# `program`'s. Accept either, and read the transcript rather than the exit
+# status: openocd exits non-zero after a *successful* flash of a RISC-V image,
+# because the trailing reset switches the chip to the Hazard3 cores and the M33
+# targets it then tries to re-attach to are powered down.
+if ! grep -qE "Verified OK|verified [0-9]+ bytes" <<<"$LOG"; then
     echo "$LOG" >&2
     die "$ROLE: image did not verify"
 fi
-grep -E "wrote [0-9]+ bytes|Verified OK" <<<"$LOG" | sed 's/^/    /'
+grep -E "wrote [0-9]+ bytes|Verified OK|verified [0-9]+ bytes" <<<"$LOG" | sed 's/^/    /'
 
 if [ "$RUN_AFTER" = halt ]; then
     echo "==> $ROLE halted"
-    oocd "$ROLE" "init" "reset halt" "exit" >/dev/null
 else
+    oocd "$ROLE" "init" "reset run" "exit" >/dev/null 2>&1 || true
     echo "==> $ROLE running"
 fi

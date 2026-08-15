@@ -258,6 +258,115 @@ So the ARM target is not merely a different instruction set with the same memory
 problem — the userspace format is what makes 8 MB workable, and that is the part
 this smoke test could not exercise.
 
+## F9. XIP execution, coherence and interrupt dispatch
+
+`hwtests/xip`, master half, 252 MHz. Everything the kernel port needed to know
+about running from PSRAM:
+
+| Question | Answer |
+|---|---|
+| Execute from PSRAM? | **Yes.** Code built at runtime and called returns correctly |
+| Instruction coherence after a write? | **Yes**, with `DSB`/`ISB`. `exec()` is safe |
+| CPU/DMA coherence in PSRAM? | **Yes**, and both XIP windows agree |
+| Unaligned access, SRAM and PSRAM? | **Yes** |
+| Vector table relocation? | **Yes.** Moved to SRAM, interrupt dispatched through it |
+
+### Execution rate: the XIP cache is the whole story
+
+| Working set | MIPS | cycles/instruction |
+|---|---|---|
+| 4 KiB — fits the XIP cache | 246 | **1.02** |
+| 96 KiB — cannot fit | 26 | **9.69** |
+
+Code resident in the 16 KiB XIP cache runs at one instruction per cycle. Code
+streaming from PSRAM runs at **one tenth** of that. This is the number that
+governs how the kernel should be laid out, and it is a far bigger lever than the
+clock (F10).
+
+A first attempt at this measured 500 MIPS at 252 MHz — two instructions per
+cycle on a single-issue core, which is not a thing. It was a 8 KiB NOP sled:
+small enough to sit in the cache, and made of an instruction the core can fold
+in the decoder without ever issuing it. The numbers above use `adds` (a real
+dependency chain) and a sled far larger than the cache.
+
+### Interrupt dispatch: put handlers in SRAM, for the tail not the mean
+
+Pending-to-entry, in cycles, measured with the DWT cycle counter:
+
+| Handler | mean | **worst** |
+|---|---|---|
+| flash XIP, idle | 30 | **580** |
+| flash XIP, under PSRAM load | 29 | **145** |
+| SRAM, idle | 29 | **29** |
+| SRAM, under PSRAM load | 29 | **29** |
+
+The means are identical and tell you nothing. The tail is the finding: a
+flash-resident handler occasionally takes **20x longer** because dispatch has to
+wait on an XIP fetch, while an SRAM-resident one is perfectly flat at 29 cycles
+every single time.
+
+So plan risk #2 resolves as: yes, force the kernel's exception entry and hot IRQ
+paths into SRAM — not for throughput, which is unaffected, but for jitter. And
+it costs nothing, because `__not_in_flash_func` is all it takes.
+
+This measurement replaced an earlier one that used the 1 us timer and reported
+"max 1 us idle, 0 us under load" for every case. At 252 MHz one microsecond is
+252 cycles, so that resolution could not see a 580-cycle stall at all.
+
+## F10. Overclocking to 504 MHz works, and buys much less than it looks like
+
+The board runs other firmware at 504 MHz, so: does Linux benefit? Measured both
+ways on the same binary.
+
+| | 252 MHz | 504 MHz | gain |
+|---|---|---|---|
+| Execution, cached (4 KiB) | 246 MIPS, cpi 1.02 | 493 MIPS, cpi 1.02 | **2.00x** |
+| Execution, streamed from PSRAM | 26 MIPS, cpi 9.69 | 28 MIPS, **cpi 18.00** | **1.08x** |
+| PSRAM clock | 126 MHz | 126 MHz | none |
+| Flash clock | 63 MHz (div 4) | 63 MHz (div 8) | none |
+| IRQ dispatch, SRAM handler | 29 cycles | 29 cycles | 2x in wall time |
+| IRQ dispatch, flash handler, worst | 759 cycles | **1427 cycles** | worse |
+
+**Cached execution scales perfectly. PSRAM-resident execution gains 8%.** The
+cycles-per-instruction figure says why: it rises from 9.69 to 18.00, so the core
+spends exactly as long in absolute time waiting for the same PSRAM. The QMI
+divider is derived from the system clock against a 133 MHz ceiling — 252/2 and
+504/4 both give 126 MHz — so PSRAM bandwidth is pinned no matter what the core
+does.
+
+For this project that means the overclock helps kernel hot paths that fit in
+16 KiB of XIP cache, and does essentially nothing for userspace streaming from
+PSRAM. Worth having, not worth designing around; the 10x cache/no-cache gap in
+F9 is where the real performance lives.
+
+### Three things that must be right, or 504 MHz just dies silently
+
+Each of these cost a debugging cycle here, and each produces the same symptom —
+one garbage byte on the console and then nothing, which looks exactly like a
+crash:
+
+1. **`vreg_disable_voltage_limit()` before requesting more than 1.30 V.**
+   `VREG_VOLTAGE_MAX` on RP2350 *is* `VREG_VOLTAGE_1_30`; a request for 1.65 V is
+   silently clamped, and the chip runs underpowered at the target clock.
+2. **Program the flash divider for the target clock *before* raising the clock,
+   from a RAM-resident function.** `set_sys_clock_khz()` returns into
+   flash-resident code, so raising the clock first means the very next
+   instruction fetch happens at the new speed with boot2's old divider — at
+   504 MHz that asks a W25Q128 for 252 MHz and XIP dies before reaching any code
+   that would have fixed it. Setting it first is safe in both directions: until
+   the clock rises the flash merely runs slower than necessary.
+3. **Pin `clk_peri` to the 48 MHz USB PLL after the clock change.**
+   `set_sys_clock_khz()` repoints `clk_peri` at `clk_sys`, so the UART divisor
+   moves with the overclock. Protea hit the same trap from the other direction
+   (`protea/firmware/rp2350/docs/dev.md`).
+
+Also worth knowing: **400 MHz is not achievable** from a 12 MHz crystal. The VCO
+would need 800 MHz, and 800/12 is not an integer feedback divider. 252, 300 and
+504 all are.
+
+`afboot-rp2350` will need all of this before it can hand a kernel a clock of its
+choosing; the working sequence is in `hwtests/xip/src/main.c`.
+
 ## F4. Master flash contents at project start
 
 Both halves arrived carrying an unrelated project's firmware (slave: a SID/6581
