@@ -19,6 +19,7 @@
 #include <string.h>
 
 #include "pico/multicore.h"
+#include "pico/time.h"
 #include "pico/stdlib.h"
 #include "tusb.h"
 
@@ -57,10 +58,23 @@ static void __not_in_flash_func(service_once)(void)
 
     tud_task();
 
-    /* Linux -> host. Only move what the host can currently accept, so a
-     * disconnected or unread port applies backpressure through the ring
-     * instead of silently dropping the kernel's output. */
-    if (tud_cdc_connected()) {
+    /*
+     * Linux -> host.
+     *
+     * Gated on tud_ready() -- the device is enumerated -- and NOT on
+     * tud_cdc_connected(), which reflects DTR. macOS asserts DTR briefly while
+     * enumerating, and treating that as a reader drained the boot banner into a
+     * port nobody had opened yet (hw-findings F12). The bootloader's output
+     * vanished exactly that way.
+     *
+     * With tud_ready() plus tud_cdc_write_available() the behaviour is right in
+     * every case that matters: unplugged, nothing is drained; enumerated but no
+     * terminal open, the endpoint FIFO fills, available goes to zero and the
+     * ring simply holds the data; terminal attached and reading, it drains.
+     * That is real backpressure rather than a timing race, and it means a
+     * kernel boot log written before anyone attaches is still there when they do.
+     */
+    if (tud_ready()) {
         uint32_t room = tud_cdc_write_available();
         if (room > sizeof(buf))
             room = sizeof(buf);
@@ -89,6 +103,42 @@ static void __not_in_flash_func(service_once)(void)
      * started once and then wedged" from "core 1 is running", which a boolean
      * cannot. */
     s->core1_alive++;
+
+    /*
+     * Publish a *debounced* DTR for core 0; see frank_console_ready().
+     *
+     * Raw DTR is not usable as "a terminal is open". macOS asserts it
+     * transiently while enumerating, and measured on this bench that blip was
+     * enough to convince the bootloader a reader had arrived: it printed its
+     * whole banner into a port nobody had opened, the 236 bytes fitted inside
+     * TinyUSB's 256-byte FIFO so no backpressure ever built up, and the ring
+     * came back empty (head == tail == 0xec) with nothing on screen.
+     *
+     * A quarter of a second of continuous assertion is far longer than the
+     * enumeration blip and far shorter than a human opening a terminal.
+     */
+    static uint64_t dtr_since;
+    if (tud_cdc_connected()) {
+        uint64_t now = time_us_64();
+        if (dtr_since == 0)
+            dtr_since = now;
+        s->reserved = (now - dtr_since >= 250000u) ? 1u : 0u;
+    } else {
+        dtr_since = 0;
+        s->reserved = 0;
+    }
+}
+
+/*
+ * Is a terminal actually open?
+ *
+ * DTR, sampled on core 1 and published for core 0 to read. Core 0 cannot call
+ * tud_cdc_connected() itself: TinyUSB's state belongs to core 1 and is not safe
+ * to touch from the other core.
+ */
+bool frank_console_ready(void)
+{
+    return FRANK_RING_SHARED->reserved != 0;
 }
 
 void __not_in_flash_func(core1_usb_main)(void)

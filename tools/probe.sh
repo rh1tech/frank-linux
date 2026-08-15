@@ -137,20 +137,47 @@ read_word() {
 # The two halves are both RP2350 and answer identically over SWD, so openocd
 # cannot tell you that a probe was moved from J1 to J3. Only the package select
 # distinguishes them, and getting it wrong overwrites the wrong chip's flash --
-# silently, and with a plausible-looking success message. Check every time; it
-# costs about a second.
+# silently, and with a plausible-looking success message.
+#
+# PACKAGE_SEL is only valid once the boot ROM has run far enough to latch it.
+# A chip stopped in the ROM -- which is exactly what rescue_reset leaves behind
+# -- reads 0 whatever package it is. Measured on this bench:
+#
+#   after rescue,  QFN-60 slave: PACKAGE_SEL = 0   (wrong)
+#   after reset run + delay:     PACKAGE_SEL = 1   (correct)
+#
+# That is worse than merely unreliable, it fails *open*: with both halves
+# reading 0, a slave image aimed at the master would pass the check (expects 0,
+# reads 0) while the correct target was refused. So let the chip start, read,
+# and only then rescue it back into the ROM for the flash itself.
 assert_half() {
     local role="$1"
     local want
     want="$(expected_package_sel "$role")" \
         || die "unknown role '$role' (expected master or slave)"
 
+    # Let the ROM run just long enough to latch the package. Any image on the
+    # flash gets a fraction of a second, and the caller rescues immediately
+    # afterwards, so a bad image has no time to matter.
+    oocd "$role" "init" "reset run" "exit" >/dev/null 2>&1 || true
+    sleep 1
+
     local got
     got="$(read_word "$role" "$SYSINFO_PACKAGE_SEL")"
-    [ -n "$got" ] || die "$role: could not read PACKAGE_SEL -- is the board powered?"
+    if [ -z "$got" ]; then
+        # No ARM answer after a reset means a RISC-V image took the cores. The
+        # package cannot be confirmed in that state; say so rather than pretend.
+        die "$role: cannot confirm which half this is -- the ARM cores did not
+       answer after reset, which means a RISC-V image is running. Re-run with
+       FRANK_ALLOW_UNVERIFIED=1 if you are certain of the wiring."
+    fi
 
     local got_bit=$(( 0x$got & 1 ))
     if [ "$got_bit" != "$want" ]; then
+        [ "${FRANK_ALLOW_UNVERIFIED:-}" = 1 ] && {
+            echo "WARN  $role: package mismatch overridden by FRANK_ALLOW_UNVERIFIED" >&2
+            return 0
+        }
         die "role '$role' expects $(package_name "$want") but this probe is on $(package_name "$got_bit").
        The probes are swapped between J1 and J3, or bench.conf is wrong.
        Refusing to flash: this would overwrite the other half."

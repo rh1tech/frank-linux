@@ -78,11 +78,14 @@ fi
 # so nothing on the flash gets a chance to run. It costs about a second and it
 # makes flashing work regardless of what is currently installed -- which during
 # a kernel bring-up is most of the time.
-rescue "$ROLE"
-ensure_arm "$ROLE"
-
+# Identify first, then rescue. assert_half has to let the ROM run to latch
+# PACKAGE_SEL, and rescue_reset stops it before that happens -- doing them the
+# other way round makes every half look like a QFN-80.
 echo "==> verifying $ROLE half"
 assert_half "$ROLE"
+
+rescue "$ROLE"
+ensure_arm "$ROLE"
 
 echo "==> flashing $ROLE <- $IMAGE${LOAD_ADDR:+ @ $LOAD_ADDR}"
 # Read the transcript, not the exit status, in both directions.

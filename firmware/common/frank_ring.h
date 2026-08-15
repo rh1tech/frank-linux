@@ -68,10 +68,22 @@
  * Fixed address in SRAM, agreed by three separate builds -- the bootloader, the
  * core 1 firmware and the Linux driver -- so it cannot be a linker symbol.
  *
- * RP2350 SRAM is 0x20000000..0x20082000 (520 kB). This sits at the top, clear
- * of core 1's own code and stack which start from the bottom.
+ * RP2350 SRAM is 0x20000000..0x20082000: 512 kB of main SRAM followed by two
+ * 4 kB scratch banks, SCRATCH_X at 0x20080000 and SCRATCH_Y at 0x20081000.
+ *
+ * NOT at 0x20080000, which is the obvious-looking "top of SRAM" and is wrong:
+ * the SDK puts the *core stacks* in those scratch banks. Core 1's stack is
+ * SCRATCH_X, so a ring there is overwritten by the very core that services it,
+ * growing down through the data while leaving the header at the bottom intact.
+ * The symptom is a block that looks perfectly healthy -- right magic, right
+ * version, plausible indices -- while the bytes going through it are corrupted
+ * and the consumer stalls. Measured: core0 sp = 0x20081fd0 in SCRATCH_Y, with
+ * head at 236 and tail stuck at 25.
+ *
+ * So: the top 8 kB of *main* SRAM instead, below both scratch banks. The
+ * firmware's .data/.bss grow up from 0x20000000 and come nowhere near it.
  */
-#define FRANK_RING_BASE     0x20080000u
+#define FRANK_RING_BASE     0x2007e000u
 
 typedef struct {
     volatile uint32_t head;      /* producer writes, consumer reads  */
@@ -83,7 +95,7 @@ typedef struct {
     volatile uint32_t magic;
     volatile uint32_t version;
     volatile uint32_t core1_alive;   /* core 1 bumps this in its service loop */
-    volatile uint32_t reserved;
+    volatile uint32_t reserved;      /* core 1 publishes DTR here */
 
     frank_ring_t tx;                 /* Linux -> core 1 -> USB host  */
     frank_ring_t rx;                 /* USB host -> core 1 -> Linux  */

@@ -489,6 +489,82 @@ opens the port. The FRANK firmware solves the same problem with
 provides the buffering; core 1 needs to stop treating a transient DTR as a
 reader. To fix with the Linux driver.
 
+## F13. afboot-rp2350 runs, and four bugs it took to get there
+
+```
+=== afboot-rp2350 ===
+afboot: sys_clk 252 MHz, flash 63 MHz
+afboot: PSRAM 8 MB at 0x11000000
+afboot: no dtb at 0x100f0000 (magic 0xffffffff)
+afboot: no kernel at 0x10100000 (magic 0xffffffff)
+afboot: no kernel to start; halting
+```
+
+Clocks, flash divider, PSRAM, the core 1 USB console as the *only* console, and
+payload detection correctly reading erased flash. Everything but the kernel
+handover. Each of the four things below presented as the same symptom -- silence
+after the first line -- and none of them was what it looked like.
+
+### 1. PACKAGE_SEL is invalid while the core is halted in the boot ROM
+
+The `assert_half` guard started refusing the slave and reporting both halves as
+QFN-80. It was not the bench:
+
+```
+after rescue,      QFN-60 slave: PACKAGE_SEL = 0   (wrong)
+plain init, ROM-halted:          PACKAGE_SEL = 0   (wrong)
+after reset run + delay:         PACKAGE_SEL = 1   (correct)
+```
+
+`SYSINFO.PACKAGE_SEL` is only valid once the boot ROM has run far enough to
+latch it, and `rescue_reset` deliberately stops the cores before that. Earlier
+in the day the unconditional `rescue` was added to `flash.sh` to stop a bad
+image breaking QMI before the debugger could probe -- and it silently broke the
+guard.
+
+**It failed open, in the dangerous direction.** With both halves reading 0, a
+slave image aimed at the master would have *passed* (expects 0, reads 0) while
+the correct target was refused. Fixed by identifying before rescuing, and the
+swapped-config test now refuses both roles rather than one.
+
+### 2. DTR is asserted transiently during enumeration
+
+macOS asserts DTR while enumerating, long enough for the bootloader to conclude
+a terminal had arrived and print its banner into a port nobody had opened.
+Measured directly: `reserved` (core 1's published DTR) reads 0 before the port
+is opened and 1 while it is open, but the ring had already emptied.
+
+Buffering does not help, because the whole banner is 236 bytes and TinyUSB's TX
+FIFO is 256 -- it is accepted whole and never applies backpressure. Core 1 now
+debounces DTR over 250 ms, far longer than the blip and far shorter than a human.
+
+### 3. The obvious "top of SRAM" address is the core stacks
+
+`0x20080000` looks like the natural place for a fixed shared block. It is
+`SCRATCH_X`, which the SDK uses for **core 1's stack**. The ring header at the
+bottom stayed pristine -- right magic, right version, plausible indices -- while
+core 1's own stack grew down through the data it was supposed to be moving.
+Moved to `0x2007e000`, the top of *main* SRAM, below both scratch banks.
+
+### 4. psram_init() kills core 1 if core 1 is already running
+
+The real cause of the silence, and the one the FRANK firmware already documents
+for a different pair of callers: `psram_init()` takes the QMI out of XIP to
+configure chip select 1, and core 1 executing TinyUSB **from flash** has nowhere
+to fetch its next instruction from. It simply stops.
+
+```
+core1_alive: 001c9f75 -> 001c9f75   (frozen)
+tx.head = 0xec, tx.tail = 0x19      (25 bytes out of 236 delivered)
+```
+
+25 bytes is exactly the first `ring_puts`. Core 0 wrote everything and reached
+its halt loop; core 1 died on the first QMI reconfiguration after it started.
+
+PSRAM must therefore be brought up **before** core 1 is launched, which costs
+the ability to report a PSRAM failure on the console -- that is what the LED is
+for.
+
 ## F4. Master flash contents at project start
 
 Both halves arrived carrying an unrelated project's firmware (slave: a SID/6581
