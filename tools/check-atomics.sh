@@ -34,7 +34,10 @@ cd "$HERE/.." || exit 1
 
 # The scan runs in the build container: the cross objdump lives there, and the
 # host's does not know this architecture.
-docker run --rm -v frank-linux-out:/out frank-linux-build sh -s -- \
+# -i, because the script arrives on stdin: without it the container gets no
+# stdin at all, `sh -s` reads an empty program, and this exits 0 having checked
+# nothing -- which is the worst possible failure for a safety check.
+docker run --rm -i -v frank-linux-out:/out frank-linux-build sh -s -- \
     "${@:-/out/core2-slave/target}" <<'EOF'
 set -u
 
@@ -54,8 +57,23 @@ for root in "$@"; do
             *ELF*) ;;
             *) continue ;;
         esac
-        n=$("$OD" -d "$f" 2>/dev/null |
-            grep -ciE "[[:space:]](ldrex|strex)[bhd]?[[:space:]]")
+        # A compare-exchange is an LDREX and a STREX close together. Counting
+        # either alone gives false positives: objdump decodes jump tables
+        # embedded in .text as instructions, and the bytes of a table entry
+        # land on a plausible STREX often enough to matter -- three libraries
+        # here each report one, every time surrounded by "movs r0, r0" and
+        # "<UNDEFINED>", and with no LDREX anywhere in the file.
+        #
+        # So require the pair, within 32 bytes. That is what the compiler
+        # emits and what data almost never is.
+        n=$("$OD" -d "$f" 2>/dev/null | awk '
+            match($0, /^[[:space:]]*[0-9a-f]+:/) {
+                addr = strtonum("0x" substr($0, RSTART, RLENGTH - 1))
+                if ($0 ~ /[[:space:]]ldrex[bhd]?[[:space:]]/) { last = addr; have = 1 }
+                else if (have && $0 ~ /[[:space:]]strex[bhd]?[[:space:]]/ &&
+                         addr - last <= 32) { pairs++; have = 0 }
+            }
+            END { print pairs + 0 }')
         printf '%s\t%s\n' "${n:-0}" "${f#"$root"/}" >> "$report"
     done
 done
@@ -63,7 +81,7 @@ done
 total=$(wc -l < "$report" | tr -d ' ')
 bad=$(awk -F'\t' '$1 != 0' "$report" | wc -l | tr -d ' ')
 
-awk -F'\t' '$1 != 0 { printf "FAIL  %-44s %s exclusive instruction(s)\n", $2, $1 }' "$report"
+awk -F'\t' '$1 != 0 { printf "FAIL  %-44s %s compare-exchange sequence(s)\n", $2, $1 }' "$report"
 
 echo
 if [ "$bad" != 0 ]; then
@@ -74,5 +92,5 @@ if [ "$bad" != 0 ]; then
     echo "      its inline atomics are not lock-free so it uses mutexes."
     exit 1
 fi
-echo "PASS  atomics: $total binaries, no LDREX/STREX"
+echo "PASS  atomics: $total binaries, no LDREX/STREX sequences"
 EOF

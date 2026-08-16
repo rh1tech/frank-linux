@@ -34,6 +34,14 @@ and would only fail by spinning, and meson does not run it when cross-
 compiling. With it off, GLib emulates its atomics with a mutex, which works
 because the C library's mutexes are implemented with a kernel compare-exchange.
 
+That alone is not enough, and the reason is worth stating: USE_NATIVE_MUTEX
+builds GMutex directly out of __atomic builtins and a futex, bypassing
+g_atomic_* and so bypassing the setting above. It is enabled whenever futex and
+atomics are *present*, never asking whether they are lock-free -- and building a
+mutex out of emulated atomics, which are themselves implemented with a mutex, is
+circular even where the hardware works. It now also requires G_ATOMIC_LOCK_FREE.
+Those three functions were the last six exclusive instructions in the library.
+
 Nothing changes on a system that has fork(), or working exclusives.
 
 Note that the posix_spawn() path needs a libc whose implementation works
@@ -191,6 +199,35 @@ Upstream status: not submitted.
    if (test_trap_last_pid < 0)
      g_error ("failed to fork test program: %s", g_strerror (errsv));
    if (test_trap_last_pid == 0)  /* child */
+--- a/glib/gthread-posix.c
++++ b/glib/gthread-posix.c
+@@ -74,8 +74,25 @@
+ #include <sys/syscall.h>
+ #endif
+ 
++/* The native mutex is built directly out of __atomic builtins and a futex,
++ * bypassing g_atomic_* entirely -- so it needs the atomics to be lock-free, not
++ * merely present. G_ATOMIC_LOCK_FREE is what says so, and when it is false the
++ * emulated g_atomic_* operations are themselves implemented with a mutex, which
++ * makes building a mutex out of them circular.
++ *
++ * On the target this matters for it is worse than circular: the atomics are not
++ * emulated because they are slow, they are emulated because LDREX/STREX have no
++ * exclusive monitor covering the memory the system runs from and the retry loop
++ * never terminates. g_mutex_lock_slowpath(), g_mutex_unlock() and
++ * g_mutex_trylock() were the last six exclusive instructions left in the
++ * library, and any one of them hangs the process for good.
++ *
++ * Without USE_NATIVE_MUTEX, GMutex is pthread_mutex_t, which on that target is
++ * implemented with a kernel-assisted compare-exchange and works.
++ */
+ #if (defined(HAVE_FUTEX) || defined(HAVE_FUTEX_TIME64)) && \
+-    (defined(HAVE_STDATOMIC_H) || defined(__ATOMIC_SEQ_CST))
++    (defined(HAVE_STDATOMIC_H) || defined(__ATOMIC_SEQ_CST)) && \
++    defined(G_ATOMIC_LOCK_FREE)
+ #define USE_NATIVE_MUTEX
+ #endif
+ 
 --- a/gio/gtestdbus.c
 +++ b/gio/gtestdbus.c
 @@ -262,7 +262,18 @@
