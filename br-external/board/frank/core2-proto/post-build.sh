@@ -52,4 +52,19 @@ done
 
 after=$(du -sk "$TARGET_DIR" | cut -f1)
 echo "post-build: stripped target, ${before} kB -> ${after} kB"
+
+# Drop the network init script.
+#
+# This kernel has no networking at all -- there is nothing to put a packet on --
+# but Buildroot's skeleton installs S40network regardless, so every boot ends
+# with
+#
+#   Starting network: ip: socket: Function not implemented
+#   FAIL
+#
+# on the console, which is the first thing anyone sees and suggests something is
+# broken. Nothing is: the script is asking for a socket the kernel was never
+# built to provide. Removing it is honest; making it print OK would not be.
+rm -f "$TARGET_DIR/etc/init.d/S40network"
+
 exit 0
