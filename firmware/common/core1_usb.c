@@ -136,6 +136,16 @@ static void __not_in_flash_func(service_once)(void)
  * tud_cdc_connected() itself: TinyUSB's state belongs to core 1 and is not safe
  * to touch from the other core.
  */
+/* Shared by afboot and the hardware tests: one console write path rather than a
+ * copy in each. */
+void frank_ring_puts(const char *str)
+{
+    const uint8_t *p = (const uint8_t *)str;
+    uint32_t len = 0;
+    while (p[len]) len++;
+    frank_ring_put(&FRANK_RING_SHARED->tx, p, len);
+}
+
 bool frank_console_ready(void)
 {
     return FRANK_RING_SHARED->reserved != 0;

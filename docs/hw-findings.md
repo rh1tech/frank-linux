@@ -646,6 +646,35 @@ then reset the chip, which disconnects USB and invalidates the file descriptor
 (`OSError: [Errno 6] Device not configured`). afboot's ten-second wait for DTR
 exists precisely so a reader can arrive after the reset.
 
+## F15. The link runs under our own firmware, beside the USB console
+
+```
+master: RESULT link master sent=53248 timeouts=12     (slave not yet listening)
+slave:  RESULT link slave blocks=64 bytes=65536 bad=0 timeouts=0
+```
+
+64 blocks, 65536 bytes, **zero bad bytes and zero timeouts**, verified against an
+LFSR pattern each side generates independently from the same seed -- so no
+reference data crosses the link being tested.
+
+What is new is not the wire, which F2 already showed at 96.1 MiB/s. It is that
+the link now runs under our firmware on the half that also runs Linux, with core
+1 serving the USB console at the same time. The two do not interfere.
+
+The master's 12 timeouts in the first run are the sequencing, not the link: the
+slave waits for a terminal before starting, so a master reset while the slave is
+still waiting finds nobody listening. Attaching to the slave console first and
+then resetting the master gives a clean 64 for 64. The doorbell handshake means
+neither side needs to agree about absolute time, but it does need the other side
+to be running.
+
+One build lesson worth keeping: both ends are built from a single source with
+`FRANK_IS_MASTER` selecting the direction, and when that define silently failed
+to reach the compiler the master compiled the *slave's* receive path -- then sat
+waiting for a doorbell nobody would ring, printing nothing, with the UART never
+even configured (`GPIO0 FUNCSEL = 0x1f`, NULL). A missing define looks exactly
+like dead hardware.
+
 ## F4. Master flash contents at project start
 
 Both halves arrived carrying an unrelated project's firmware (slave: a SID/6581
