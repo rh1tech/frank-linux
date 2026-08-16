@@ -41,5 +41,27 @@ export XDG_DATA_HOME=/tmp/share
 export PS1='\w
 # '
 
-# No aliases: hush has no `alias` builtin, and sourcing this printed
-# "sh: can't execute 'alias': No such file or directory" on every login.
+# Functions, not aliases.
+#
+# hush has no `alias` builtin at all -- it is on the "not implemented" list at
+# the top of shell/hush.c, and sourcing a file that uses one prints
+# "sh: can't execute 'alias'" on every login. It is also not something that
+# falls out of a port: aliases are a parse-time substitution and would need a
+# push-back layer in hush's input reader, which is `const char *p` plus a
+# two-character peek buffer. See docs/shell-nommu.md.
+#
+# Functions do nearly the same job and hush has them. The difference that
+# remains is that a function cannot expand to part of a command or take the
+# place of a keyword -- `ll -a` works, `alias sudo='sudo '` has no equivalent.
+ll()  { ls -lh "$@"; }
+la()  { ls -lha "$@"; }
+l()   { ls -1 "$@"; }
+df()  { busybox df -h "$@"; }
+free(){ busybox free -m "$@"; }
+mem() { busybox free -m; cat /proc/buddyinfo; }
+
+# Executable mappings, where a 0x10.. address means the code is being
+# fetched from flash as it runs and costs no RAM, and 0x11.. means it was copied
+# into memory. A plain grep rather than something that reformats: the addresses
+# are the answer, and a mapping this misparsed would be worse than no tool.
+xip() { grep ' r-xp ' "/proc/${1:-self}/maps"; }
