@@ -73,15 +73,22 @@ to apply blindly to every Cortex-M.
 +  register unsigned int __r0 __asm__ ("r0") = __oldval;
 +  register unsigned int __r1 __asm__ ("r1") = __newval;
 +  register volatile void *__r2 __asm__ ("r2") = __ptr;
++  register int __result __asm__ ("r0");
 +  /* __ARM_NR_BASE + 0x00fff0, spelled out so this header needs no kernel
 +     header of its own.  */
-+  register unsigned int __r7 __asm__ ("r7") = 0x0ffff0;
-+  register int __result __asm__ ("r0");
++  unsigned int __nr = 0x0ffff0;
 +
-+  __asm__ __volatile__ ("svc\t#0"
++  /* r7 is saved and restored around the call, through ip, for the same reason
++     INTERNAL_SYSCALL_NCS does it in bits/syscalls.h: r7 is the frame pointer
++     in Thumb, and this header is included by translation units built with
++     flags this one does not control.  */
++  __asm__ __volatile__ ("mov\tip, r7\n\t"
++			"mov\tr7, %[nr]\n\t"
++			"svc\t#0\n\t"
++			"mov\tr7, ip"
 +			: "=r" (__result)
-+			: "r" (__r0), "r" (__r1), "r" (__r2), "r" (__r7)
-+			: "memory", "cc");
++			: "r" (__r0), "r" (__r1), "r" (__r2), [nr] "r" (__nr)
++			: "ip", "memory", "cc");
 +  return __result;
 +}
 +

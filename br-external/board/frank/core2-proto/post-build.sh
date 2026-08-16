@@ -144,7 +144,7 @@ if [ -n "$CC" ]; then
               "$BR2_EXTERNAL_FRANK_LINUX_PATH/board/frank/core2-proto/$t.c"
         "$STRIP" --strip-unneeded "$TARGET_DIR/usr/bin/$t"
     done
-    echo "post-build: installed mputest memtouch"
+    echo "post-build: installed mputest memtouch castest"
 else
     echo "post-build: no cross gcc found; test tools not built" >&2
 fi
