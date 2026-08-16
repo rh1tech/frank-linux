@@ -59,8 +59,8 @@ package_name() {
 # passing test into "no probe configured for role 'slave'".
 probe_serial() {
     local role="$1"
-    local out i
-    for i in 1 2 3; do
+    local out
+    for _ in 1 2 3; do
         out="$(python3 "$PROBE_SH_DIR/devices.py" resolve "$role" 2>/dev/null \
                | sed -n 's/^[A-Z]*_PROBE_SERIAL=//p')"
         [ -n "$out" ] && { echo "$out"; return 0; }

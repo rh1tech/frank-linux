@@ -222,6 +222,11 @@ slave-kernel-rebuild: volumes
 		cp /out/core2-slave/images/* /src/build/core2-slave/'
 	@ls -l build/core2-slave/
 
+# Run what CI runs, before pushing. CI failed for six commits on three unused
+# shell variables, which is exactly the kind of thing worth catching locally.
+lint:
+	@shellcheck -e SC1091 tools/*.sh .githooks/commit-msg && echo "shellcheck clean"
+
 # --------------------------------------- kernel source access ---------------
 # The kernel tree lives inside the build volume, not in the repo. This copies a
 # file out of it so it can be read without a shell in the container.
@@ -233,3 +238,6 @@ kernel-cat: volumes
 # Search the kernel tree inside the build volume.
 kernel-grep: volumes
 	@$(DOCKER_RUN) sh -c 'grep -rn "$(P)" /out/core2-slave/build/linux-6.*/$(D) | head -20'
+
+kernel-ls: volumes
+	@$(DOCKER_RUN) sh -c 'ls -la /out/core2-slave/build/linux-6.*/$(D)'

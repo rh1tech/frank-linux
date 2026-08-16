@@ -77,11 +77,14 @@ for cand in "$HOST_DIR"/bin/*-uclinuxfdpiceabi-gcc; do
     [ -x "$cand" ] && { CC="$cand"; break; }
 done
 if [ -n "$CC" ]; then
-    "$CC" -Os -Wall -o "$TARGET_DIR/usr/bin/mputest" "$BR2_EXTERNAL_FRANK_LINUX_PATH/board/frank/core2-proto/mputest.c"
-    "$STRIP" --strip-unneeded "$TARGET_DIR/usr/bin/mputest"
-    echo "post-build: installed mputest"
+    for t in mputest memtouch; do
+        "$CC" -Os -Wall -o "$TARGET_DIR/usr/bin/$t" \
+              "$BR2_EXTERNAL_FRANK_LINUX_PATH/board/frank/core2-proto/$t.c"
+        "$STRIP" --strip-unneeded "$TARGET_DIR/usr/bin/$t"
+    done
+    echo "post-build: installed mputest memtouch"
 else
-    echo "post-build: no cross gcc found; mputest not built" >&2
+    echo "post-build: no cross gcc found; test tools not built" >&2
 fi
 
 exit 0

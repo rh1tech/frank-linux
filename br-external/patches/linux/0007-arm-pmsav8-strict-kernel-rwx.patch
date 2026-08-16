@@ -1,0 +1,329 @@
+arm: implement STRICT_KERNEL_RWX on PMSAv8
+
+An MPU can do this, but the ARM port only offers ARCH_HAS_STRICT_KERNEL_RWX
+when there is an MMU, so every NOMMU kernel with an MPU prints
+
+  This architecture does not have kernel memory protection.
+
+which on a machine whose MPU is enabled and enforcing is simply untrue -- what
+is missing is not the hardware but the code to use it for this.
+
+pmsav8_setup() maps the kernel as one region: readable, writable and executable
+throughout. Splitting it in two costs one more region of the eight and gives the
+usual guarantees -- text and rodata read-only, data and bss never executable.
+The boundary is __init_begin rather than __end_rodata: everything below it is
+text, rodata and the tables between them, and splitting lower would only move
+those tables into the writable half for nothing.
+
+The MPU is disabled across the change. Two regions have to be rewritten and
+there is no way to do it in one step: shrinking the kernel region first leaves
+data and bss unmapped and the next stack access faults, while writing the new
+region first leaves the two overlapping, which is UNPREDICTABLE on ARMv8-M.
+With the MPU off the default map applies and neither window exists.
+
+Nothing here may be __init or use __initdata, because mark_rodata_ro() runs
+after free_initmem(); the region count is read from MPUIR rather than from the
+__initdata copy pmsav8_setup() kept.
+
+Only PMSAv8 is implemented. On PMSAv7 mark_rodata_ro() says so, which is worth
+more than a silent no-op that would leave the impression the kernel is
+protected.
+
+Measured on an RP2350 (Cortex-M33, 8 regions), the kernel region becomes:
+
+  text+rodata  0x11008180-0x111e6000  PL1 RO, PL0 none, executable
+  data+bss     0x111e6000-0x112cb000  PL1 RW, PL0 none, XN
+
+six of eight regions used, and the message is gone because it is no longer true.
+
+--- a/arch/arm/Kconfig
++++ b/arch/arm/Kconfig
+@@ -27,6 +27,11 @@
+ 	select ARCH_HAS_SET_MEMORY
+ 	select ARCH_STACKWALK
+ 	select ARCH_HAS_STRICT_KERNEL_RWX if MMU && !XIP_KERNEL
++	# An MPU can enforce this too: the kernel's own region is split into a
++	# read-only executable half and a writable never-executable one. Only
++	# implemented for PMSAv8; mark_rodata_ro() says so plainly on PMSAv7
++	# rather than pretending.
++	select ARCH_HAS_STRICT_KERNEL_RWX if ARM_MPU && !XIP_KERNEL
+ 	select ARCH_HAS_STRICT_MODULE_RWX if MMU
+ 	select ARCH_HAS_SYNC_DMA_FOR_DEVICE
+ 	select ARCH_HAS_SYNC_DMA_FOR_CPU
+--- a/arch/arm/include/asm/mpu.h
++++ b/arch/arm/include/asm/mpu.h
+@@ -57,6 +57,7 @@
+ 
+ #define PMSAv8_AP_PL1RW_PL0NA	(0 << 1)
+ #define PMSAv8_AP_PL1RW_PL0RW	(1 << 1)
++#define PMSAv8_AP_PL1RO_PL0NA	(2 << 1)
+ #define PMSAv8_AP_PL1RO_PL0RO	(3 << 1)
+ 
+ #ifdef CONFIG_SMP
+@@ -122,11 +123,15 @@
+ 
+ extern void __init pmsav7_setup(void);
+ extern void __init pmsav8_setup(void);
++
++/* Not __init: mark_rodata_ro() runs after free_initmem(). */
++extern void pmsav8_mark_rodata_ro(void);
+ #else
+ static inline void pmsav7_adjust_lowmem_bounds(void) {};
+ static inline void pmsav8_adjust_lowmem_bounds(void) {};
+ static inline void pmsav7_setup(void) {};
+ static inline void pmsav8_setup(void) {};
++static inline void pmsav8_mark_rodata_ro(void) {};
+ #endif
+ 
+ #endif /* __ASSEMBLY__ */
+--- a/arch/arm/mm/Kconfig
++++ b/arch/arm/mm/Kconfig
+@@ -1126,7 +1126,12 @@
+ 
+ config DEBUG_ALIGN_RODATA
+ 	bool "Make rodata strictly non-executable"
+-	depends on STRICT_KERNEL_RWX
++	# MMU as well as STRICT_KERNEL_RWX: this pads rodata out to a section
++	# boundary in vmlinux.lds.S using SECTION_SHIFT, which only exists when
++	# there are page tables. Without the dependency a NOMMU kernel that
++	# selects STRICT_KERNEL_RWX gets this by default and fails to link with
++	# "undefined symbol `SECTION_SHIFT' referenced in expression".
++	depends on STRICT_KERNEL_RWX && MMU
+ 	default y
+ 	help
+ 	  If this is set, rodata will be made explicitly non-executable. This
+--- a/arch/arm/kernel/vmlinux.lds.S
++++ b/arch/arm/kernel/vmlinux.lds.S
+@@ -16,6 +16,22 @@
+ #include <asm/page.h>
+ #include <asm/mpu.h>
+ 
++/*
++ * Granularity at which kernel permissions change.
++ *
++ * With an MMU that is a 1 MB section, because the permission bits live in the
++ * section descriptors. With an MPU it is whatever the region registers can
++ * express -- 32 bytes on PMSAv8 -- so a page is already far more than enough,
++ * and a section alignment would waste most of a small system. SECTION_SHIFT
++ * does not exist at all without page tables, so this is not merely a size
++ * question: a NOMMU kernel with STRICT_KERNEL_RWX fails to link without it.
++ */
++#ifdef CONFIG_MMU
++#define ARM_RWX_ALIGN	(1 << SECTION_SHIFT)
++#else
++#define ARM_RWX_ALIGN	PAGE_SIZE
++#endif
++
+ OUTPUT_ARCH(arm)
+ ENTRY(stext)
+ 
+@@ -54,7 +70,7 @@
+ 	}
+ 
+ #ifdef CONFIG_STRICT_KERNEL_RWX
+-	. = ALIGN(1<<SECTION_SHIFT);
++	. = ALIGN(ARM_RWX_ALIGN);
+ #endif
+ 
+ #ifdef CONFIG_ARM_MPU
+@@ -66,7 +82,7 @@
+ 	}
+ 
+ #ifdef CONFIG_DEBUG_ALIGN_RODATA
+-	. = ALIGN(1<<SECTION_SHIFT);
++	. = ALIGN(ARM_RWX_ALIGN);
+ #endif
+ 	_etext = .;			/* End of text section */
+ 
+@@ -84,7 +100,7 @@
+ #endif
+ 
+ #ifdef CONFIG_STRICT_KERNEL_RWX
+-	. = ALIGN(1<<SECTION_SHIFT);
++	. = ALIGN(ARM_RWX_ALIGN);
+ #else
+ 	. = ALIGN(PAGE_SIZE);
+ #endif
+@@ -136,7 +152,7 @@
+ #endif
+ 
+ #ifdef CONFIG_STRICT_KERNEL_RWX
+-	. = ALIGN(1<<SECTION_SHIFT);
++	. = ALIGN(ARM_RWX_ALIGN);
+ #else
+ 	. = ALIGN(THREAD_ALIGN);
+ #endif
+@@ -165,7 +181,7 @@
+  * be the first section-aligned location after __start_rodata. Otherwise,
+  * it will be equal to __start_rodata.
+  */
+-__start_rodata_section_aligned = ALIGN(__start_rodata, 1 << SECTION_SHIFT);
++__start_rodata_section_aligned = ALIGN(__start_rodata, ARM_RWX_ALIGN);
+ #endif
+ 
+ /*
+--- a/arch/arm/mm/init.c
++++ b/arch/arm/mm/init.c
+@@ -264,7 +264,12 @@
+ #endif
+ }
+ 
+-#ifdef CONFIG_STRICT_KERNEL_RWX
++/*
++ * This implementation is page-table based, so it needs an MMU. NOMMU kernels
++ * can select STRICT_KERNEL_RWX too, now that an MPU can enforce it, and there
++ * the work is done by mark_rodata_ro() in nommu.c instead.
++ */
++#if defined(CONFIG_STRICT_KERNEL_RWX) && defined(CONFIG_MMU)
+ struct section_perm {
+ 	const char *name;
+ 	unsigned long start;
+@@ -426,7 +431,7 @@
+ 
+ #else
+ static inline void fix_kernmem_perms(void) { }
+-#endif /* CONFIG_STRICT_KERNEL_RWX */
++#endif /* CONFIG_STRICT_KERNEL_RWX && CONFIG_MMU */
+ 
+ void free_initmem(void)
+ {
+--- a/arch/arm/mm/pmsa-v8.c
++++ b/arch/arm/mm/pmsa-v8.c
+@@ -237,6 +237,107 @@
+ }
+ #endif
+ 
++#ifdef CONFIG_STRICT_KERNEL_RWX
++/*
++ * Split the kernel's region in two: text and rodata read-only and executable,
++ * everything after them writable and never executable.
++ *
++ * None of this can be __init or use __initdata -- mark_rodata_ro() runs after
++ * free_initmem(), so anything in .init has already been given back.
++ */
++static int pmsav8_free_region(void)
++{
++	unsigned int max = (read_cpuid_mputype() & MPUIR_DREGION_SZMASK)
++			   >> MPUIR_DREGION;
++	unsigned int i;
++
++	for (i = 0; i < max && i < MPU_MAX_REGIONS; i++) {
++		prsel_write(i);
++		isb();
++		if (!(prlar_read() & PMSAv8_LAR_EN))
++			return i;
++	}
++	return -ENOSPC;
++}
++
++static void pmsav8_program(unsigned int number, u32 bar, u32 lar)
++{
++	prsel_write(number);
++	isb();
++	prbar_write(bar);
++	prlar_write(lar);
++
++	mpu_rgn_info.rgns[number].prbar = bar;
++	mpu_rgn_info.rgns[number].prlar = lar;
++}
++
++void pmsav8_mark_rodata_ro(void)
++{
++	phys_addr_t ro_start = __pa(KERNEL_START);
++	phys_addr_t ro_end = __pa(__init_begin);
++	phys_addr_t rw_end = __pa(KERNEL_END);
++	void __iomem *scb = BASEADDR_V7M_SCB;
++	unsigned long flags;
++	int rw_rgn;
++	u32 ctrl;
++
++	/*
++	 * The boundary is __init_begin rather than __end_rodata. Everything
++	 * below it is text, rodata and the tables between them; everything at
++	 * or above it is the init sections (already freed) followed by data and
++	 * bss. Splitting at __end_rodata would leave those tables in the
++	 * writable half for no gain.
++	 */
++	rw_rgn = pmsav8_free_region();
++	if (rw_rgn < 0) {
++		pr_warn("MPU: no free region, kernel text left writable\n");
++		return;
++	}
++
++	/*
++	 * The MPU goes off across the change.
++	 *
++	 * Two regions have to be rewritten and there is no way to do it in one
++	 * step. Shrinking the kernel region first leaves data and bss unmapped,
++	 * and the next stack access faults; writing the new region first leaves
++	 * the two overlapping, which is UNPREDICTABLE on ARMv8-M. With the MPU
++	 * disabled the default map applies, so neither window exists. Interrupts
++	 * are off so nothing runs unprotected for longer than these few stores.
++	 */
++	local_irq_save(flags);
++
++	ctrl = readl_relaxed(scb + MPU_CTRL);
++	writel_relaxed(ctrl & ~MPU_CTRL_ENABLE, scb + MPU_CTRL);
++	dsb();
++	isb();
++
++	/* data and bss: writable, never executable */
++	pmsav8_program(rw_rgn,
++		       ro_end | PMSAv8_AP_PL1RW_PL0NA | PMSAv8_RGN_SHARED |
++				PMSAv8_BAR_XN,
++		       ((rw_end - 1) & ~(PMSAv8_MINALIGN - 1)) |
++				PMSAv8_LAR_IDX(PMSAv8_RGN_NORMAL) | PMSAv8_LAR_EN);
++
++	/* text and rodata: executable, read-only */
++	pmsav8_program(PMSAv8_KERNEL_REGION,
++		       ro_start | PMSAv8_AP_PL1RO_PL0NA | PMSAv8_RGN_SHARED,
++		       ((ro_end - 1) & ~(PMSAv8_MINALIGN - 1)) |
++				PMSAv8_LAR_IDX(PMSAv8_RGN_NORMAL) | PMSAv8_LAR_EN);
++
++	dsb();
++	writel_relaxed(ctrl, scb + MPU_CTRL);
++	dsb();
++	isb();
++
++	local_irq_restore(flags);
++
++	mpu_rgn_info.used++;
++
++	pr_info("Kernel text %pa-%pa read-only, data %pa-%pa non-executable\n",
++		&ro_start, &ro_end, &ro_end, &rw_end);
++}
++#endif /* CONFIG_STRICT_KERNEL_RWX */
++
+ void __init pmsav8_setup(void)
+ {
+ 	int i, err = 0;
+--- a/arch/arm/mm/nommu.c
++++ b/arch/arm/mm/nommu.c
+@@ -126,6 +126,27 @@
+ 	}
+ }
+ 
++#ifdef CONFIG_STRICT_KERNEL_RWX
++/*
++ * Only PMSAv8 implements this. On PMSAv7 say so rather than returning quietly:
++ * init/main.c has already printed nothing at all in that case, and a silent
++ * no-op here would leave the impression the kernel is protected when it is not.
++ */
++void mark_rodata_ro(void)
++{
++	unsigned long pmsa = read_cpuid_ext(CPUID_EXT_MMFR0) & MMFR0_PMSA;
++
++	switch (pmsa) {
++	case MMFR0_PMSAv8:
++		pmsav8_mark_rodata_ro();
++		break;
++	default:
++		pr_warn("Kernel memory protection not implemented for this MPU\n");
++		break;
++	}
++}
++#endif
++
+ static void __init mpu_setup(void)
+ {
+ 	unsigned long pmsa = read_cpuid_ext(CPUID_EXT_MMFR0) & MMFR0_PMSA;

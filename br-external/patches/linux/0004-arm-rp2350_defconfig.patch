@@ -25,7 +25,7 @@ stack is pure overhead in 8 MB.
 
 --- /dev/null
 +++ b/arch/arm/configs/rp2350_defconfig
-@@ -0,0 +1,106 @@
+@@ -0,0 +1,112 @@
 +CONFIG_NO_HZ_IDLE=y
 +CONFIG_HIGH_RES_TIMERS=y
 +CONFIG_PREEMPT_VOLUNTARY=y
@@ -129,6 +129,12 @@ stack is pure overhead in 8 MB.
 +# -- and the peripherals are all covered without anything board-specific. Five
 +# of the eight regions are used.
 +CONFIG_ARM_MPU=y
++
++# Kernel text read-only, kernel data non-executable, enforced by the MPU.
++# Needs patch 0007: mainline only offers ARCH_HAS_STRICT_KERNEL_RWX when there
++# is an MMU, so without it every NOMMU kernel claims to have no kernel memory
++# protection whether or not its MPU is on.
++CONFIG_STRICT_KERNEL_RWX=y
 +
 +CONFIG_OF=y
 +CONFIG_USE_OF=y

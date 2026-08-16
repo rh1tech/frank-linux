@@ -11,7 +11,8 @@
 #
 #   1. the kernel says it programmed the MPU        (boot log)
 #   2. MPU_CTRL really has ENABLE set               (SWD, not the kernel's word)
-#   3. a user process reading kernel memory dies    (mputest, on the target)
+#   3. kernel text is read-only and data is XN      (SWD, region permissions)
+#   4. a user process reading kernel memory dies    (mputest, on the target)
 #
 # The address in (3) is not guessed: it is read out of the region the kernel
 # programmed, so the test cannot drift away from the layout it is checking.
@@ -45,11 +46,10 @@ grep -a "PMSAv8 Compliant MPU" "$LOG" | sed 's/^/    /'
 
 echo "==> reading the MPU registers over SWD"
 # The kernel's own log is not evidence that the hardware agrees with it.
-regs="$(oocd slave "init" "halt" "mdw $MPU_TYPE 2" "exit" 2>/dev/null)"
-type_ctrl="$(sed -n "s/^$MPU_TYPE: *//p" <<<"$regs" | tr -d '\r')"
-[ -n "$type_ctrl" ] || die "could not read the MPU registers"
-mtype="$(awk '{print $1}' <<<"$type_ctrl")"
-mctrl="$(awk '{print $2}' <<<"$type_ctrl")"
+regs="$(oocd slave "init" "halt" "mdw $MPU_TYPE 1" "mdw $MPU_CTRL 1" "exit" 2>/dev/null)"
+mtype="$(sed -n "s/^$MPU_TYPE: *//p" <<<"$regs" | tr -d '\r' | awk '{print $1}')"
+mctrl="$(sed -n "s/^$MPU_CTRL: *//p" <<<"$regs" | tr -d '\r' | awk '{print $1}')"
+[ -n "$mtype" ] && [ -n "$mctrl" ] || die "could not read the MPU registers"
 regions=$(( (0x$mtype >> 8) & 0xff ))
 echo "    MPU_TYPE=0x$mtype ($regions regions), MPU_CTRL=0x$mctrl"
 
@@ -62,11 +62,11 @@ fi
 echo "==> locating the privileged-only region"
 kaddr=""
 for n in $(seq 0 $((regions - 1))); do
-    out="$(oocd slave "init" "halt" "mww $MPU_RNR $n" "mdw $MPU_RBAR 2" "exit" 2>/dev/null)"
-    pair="$(sed -n "s/^$MPU_RBAR: *//p" <<<"$out" | tr -d '\r')"
-    [ -n "$pair" ] || continue
-    rbar="$(awk '{print $1}' <<<"$pair")"
-    rlar="$(awk '{print $2}' <<<"$pair")"
+    out="$(oocd slave "init" "halt" "mww $MPU_RNR $n" \
+                "mdw $MPU_RBAR 1" "mdw $MPU_RLAR 1" "exit" 2>/dev/null)"
+    rbar="$(sed -n "s/^$MPU_RBAR: *//p" <<<"$out" | tr -d '\r' | awk '{print $1}')"
+    rlar="$(sed -n "s/^$MPU_RLAR: *//p" <<<"$out" | tr -d '\r' | awk '{print $1}')"
+    [ -n "$rbar" ] && [ -n "$rlar" ] || continue
     [ $(( 0x$rlar & 1 )) -eq 1 ] || continue          # region disabled
     [ $(( (0x$rbar >> 1) & 3 )) -eq 0 ] || continue   # AP != PL1-only
     base=$(( 0x$rbar & 0xffffffe0 ))
@@ -78,6 +78,37 @@ for n in $(seq 0 $((regions - 1))); do
     break
 done
 [ -n "$kaddr" ] || die "no privileged-only region found -- the kernel is not protected"
+
+echo "==> checking the kernel's own text is read-only"
+# STRICT_KERNEL_RWX splits the kernel region in two. Assert on the region
+# registers rather than the boot message: the message is the kernel's opinion,
+# these are what the hardware will actually enforce.
+#
+# RBAR[2:1] is AP -- 2 means PL1 read-only, PL0 no access -- and RBAR[0] is XN.
+ro_exec=0
+rw_xn=0
+for n in $(seq 0 $((regions - 1))); do
+    out="$(oocd slave "init" "halt" "mww $MPU_RNR $n" \
+                "mdw $MPU_RBAR 1" "mdw $MPU_RLAR 1" "exit" 2>/dev/null)"
+    rbar="$(sed -n "s/^$MPU_RBAR: *//p" <<<"$out" | tr -d '\r' | awk '{print $1}')"
+    rlar="$(sed -n "s/^$MPU_RLAR: *//p" <<<"$out" | tr -d '\r' | awk '{print $1}')"
+    [ -n "$rbar" ] && [ -n "$rlar" ] || continue
+    [ $(( 0x$rlar & 1 )) -eq 1 ] || continue
+    ap=$(( (0x$rbar >> 1) & 3 ))
+    xn=$(( 0x$rbar & 1 ))
+    if [ "$ap" -eq 2 ] && [ "$xn" -eq 0 ]; then
+        ro_exec=1
+        printf "    region %d: 0x%08x is PL1 read-only and executable (text)\n" \
+               "$n" $(( 0x$rbar & 0xffffffe0 ))
+    fi
+    if [ "$ap" -eq 0 ] && [ "$xn" -eq 1 ]; then
+        rw_xn=1
+        printf "    region %d: 0x%08x is PL1 read-write and never executable (data)\n" \
+               "$n" $(( 0x$rbar & 0xffffffe0 ))
+    fi
+done
+[ "$ro_exec" -eq 1 ] || die "no read-only executable region: kernel text is writable"
+[ "$rw_xn" -eq 1 ] || die "no writable non-executable region: kernel data is executable"
 
 echo "==> asking a user process to read it"
 python3 - "$LOG" "$kaddr" <<'PY'
@@ -108,4 +139,5 @@ fi
 if ! grep -qa "MPUTEST RESULT protected" "$LOG"; then
     die "mputest did not report a result (log: $LOG)"
 fi
-echo "PASS  MPU: PMSAv8 enabled, $regions regions, and userspace cannot reach the kernel"
+echo "PASS  MPU: PMSAv8 on $regions regions -- kernel text read-only, data"
+echo "      non-executable, and userspace cannot reach either"

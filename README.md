@@ -27,8 +27,8 @@ a shared libc is what makes 8 MB of RAM hold a usable userspace at all (F8).
   |  8 MB PSRAM @ 0x11000000    | 96   |  core1: HSTX DVI scanout       |
   |    = system RAM             | MiB/s|  Protea terminal engine        |
   |  16 MB flash @ 0x10000000   |      |  8 MB PSRAM: free              |
-  |    = xipImage + DTB         |      +--------------------------------+
-  |  UART1 J4 = debug console   |         HDMI J5   USB-C J8   uSD J7
+  |    = afboot + kernel + DTB  |      +--------------------------------+
+  |  USB CDC = debug console    |         HDMI J5   USB-C J8   uSD J7
   +-----------------------------+
 ```
 
@@ -44,8 +44,9 @@ See [docs/hw-findings.md](docs/hw-findings.md) F3.
 
 ## Status
 
-**Phase 6 complete. Linux runs on the RP2350's Cortex-M33, with an HDMI console,
-a USB keyboard and a microSD -- all served by the second RP2350 over the link.**
+**Done. Linux runs on the RP2350's Cortex-M33, with an HDMI console, a USB
+keyboard and a microSD — all served by the second RP2350 over the link — and a
+PMSAv8 MPU enforcing kernel/user separation and read-only kernel text.**
 
 ```
 ~ # cat /proc/cpuinfo
@@ -70,11 +71,40 @@ Read off the HDMI capture card, not off a serial log: the screen above is drawn
 by the other RP2350, the keystrokes went the other way down the same link, and
 the microSD is on that half too -- this one has no card slot at all.
 
-As far as we know this is the first Linux to run on this core. Console served by
-core 1 over USB CDC, FDPIC userspace with a shared libc, interrupt-masked
-atomics, 8 MB of PSRAM as system RAM, the microSD the other
-RP2350 answers for because the slave half has no storage of its own, and a
-PMSAv8 MPU that actually keeps userspace out of the kernel.
+As far as we know this is the first Linux to run on this core. FDPIC userspace
+with a shared libc, interrupt-masked atomics, 8 MB of PSRAM as system RAM, the
+microSD the other RP2350 answers for because this half has no card slot, and an
+MPU that keeps userspace out of the kernel and the kernel out of its own text:
+
+```
+[    0.000000] Using ARM PMSAv8 Compliant MPU. Used 5 of 8 regions
+[    1.333656] Kernel text 0x11009000-0x111e7000 read-only,
+               data 0x111e7000-0x112cd020 non-executable
+~ # mputest 0x1125a000
+MPUTEST kernel 0x1125a000 FAULTED sig=11
+MPUTEST RESULT protected
+```
+
+The console is served by core 1: the kernel writes bytes into a ring in SRAM and
+core 1 fans them out to USB CDC and, over the link, to the master's terminal.
+The USB console stays live alongside HDMI, which is the rule the whole project
+runs on — there is always a channel that does not depend on the thing being
+debugged.
+
+### Kernel patches
+
+Seven, in `br-external/patches/linux/`. Five make the port exist; two are gaps in
+mainline that only show up once an MPU is switched on.
+
+| | |
+|---|---|
+| `0001` | `ARM_NO_EXCLUSIVES` — LDREX/STREX are unusable outside SRAM here (F6/F7) |
+| `0002` | interrupt-masked atomics, including a new `cmpxchg` path: the pre-v6 one uses `swp`, which ARMv7-M does not have |
+| `0003` | `ARCH_RP2350` — machine, timer, ring console and link block driver |
+| `0004` | `rp2350_defconfig` |
+| `0005` | device tree for this board |
+| `0006` | **deliver a signal on an MPU fault.** Mainline points the MemManage vector at `__invalid_entry`, which prints a register dump and then spins forever — so with `ARM_MPU` on, the first stray user pointer stops the machine |
+| `0007` | **`STRICT_KERNEL_RWX` on PMSAv8.** `ARCH_HAS_STRICT_KERNEL_RWX` is offered only when there is an MMU, so every NOMMU kernel claimed to have no kernel memory protection whether or not its MPU was on |
 
 `tools/check.sh` — the harness, validated against known-good firmware:
 
@@ -141,16 +171,34 @@ an identity. `tools/bench.conf` maps role to serial; everything else discovers.
 | `fontgen.py` | load Protea's font sheets, geometry detected and shape-checked |
 | `screen.py` | HDMI frame -> 80x25 text, with a confidence floor |
 | `test_screen.py` | decoder round-trip, no hardware needed |
+| `slave_console.py` | attach across a reset, waiting for the old USB node to go |
 | `build-reffw.sh` | build the reference firmware used to validate all of the above |
-| `check.sh` | the whole gate |
+| `build-afboot.sh` / `build-ioserver.sh` | the two firmwares |
+| `flash-slave.sh` | bootloader + kernel + DTB, then boot and assert a shell |
+| `check.sh` | the harness gate, against known-good firmware |
+| `test-blk.sh` | the microSD, mounted from Linux over the link |
+| `test-console.sh` | a shell on HDMI, answering typed input |
+| `test-mpu.sh` | MPU on, kernel text read-only, userspace locked out |
 
-Two rules the harness enforces, both learned from the existing code:
+Rules the harness enforces, each learned the expensive way:
 
 - **Never `halt` over SWD while asserting on video.** Halting stops core 1, the
   HSTX scanout dies, and the capture shows a "no signal" pattern.
 - **Never flash without checking which half you are on.** Both chips are RP2350
   and answer identically over SWD; only `SYSINFO.PACKAGE_SEL` distinguishes
   QFN-80 from QFN-60. `flash.sh` reads it every time and refuses on a mismatch.
+- **SWD runs at 1 MHz, not 5.** Once the master drives HDMI — eight differential
+  pairs switching at 252 MHz — 5 MHz SWD stops working on that half. It does not
+  fail as "SWD is marginal": it fails as a flash write that verifies wrong, and
+  by then the erase has happened, so the chip has no valid image, wedges on boot,
+  and the next thing to touch it reports something else entirely (F20).
+- **Identify the half in one openocd session, 30 ms long.** Two sessions leave
+  the image running for most of a second while openocd relaunches, which is long
+  enough for the master to start scanning out video; DispHSTX's DMA then fights
+  openocd for SRAM and the flash write fails (F19).
+- **Assert on something only success can produce.** Two versions of the block
+  test passed on failure — `grep frankblk0` matched `No such file or directory`,
+  and the next attempt matched the shell echoing the command back.
 
 ## Requirements
 
@@ -160,23 +208,55 @@ a Debian container (Buildroot needs Linux); the harness runs natively.
 
 Written for bash 3.2, which is what macOS ships — no associative arrays.
 
+`make lint` runs what CI runs.
+
 ## Layout
 
 ```
-tools/            test harness (above)
-firmware/compat/  shim for a stale include in the reference firmware
-docs/             hw-findings.md -- measurements, not datasheet quotes
-board/ configs/ package/    Buildroot external tree (Phase 3 onward)
-hwtests/          Phase 2 bare-metal experiments
+tools/                      test harness and gates (above)
+firmware/afboot-rp2350/     slave bootloader: clocks, QMI/PSRAM, DTB, handover
+firmware/master-ioserver/   master: terminal, HDMI, USB HID, microSD, link
+firmware/common/            link bus, console ring, core-1 services
+br-external/                Buildroot external tree: configs, kernel patches, DTS
+hwtests/                    bare-metal experiments behind docs/hw-findings.md
+docs/                       hw-findings.md -- measurements, not datasheet quotes
+smoke-riscv/                the RISC-V reference boot, kept as a control
 ```
 
-## Plan
+## How it was built
 
-Phases and gates: see the plan file. Each gate is the same assertion made on
-progressively more of the real system — *a BusyBox prompt appears* — on the
-slave's UART under RISC-V, in QEMU under ARM, on the slave's UART under ARM,
-over the link, and finally decoded off the HDMI capture with a USB keyboard
-driving it.
+One assertion, made on progressively more of the real system: *a BusyBox prompt
+appears*.
+
+| | gate |
+|---|---|
+| 0 | the harness itself, against firmware already known to work |
+| 1 | RISC-V Linux on the master half — somebody else's known-good code, to prove the board |
+| 2 | bare-metal measurements, which is where the atomics plan died |
+| 3 | ARM NOMMU + FDPIC under QEMU, no hardware |
+| 4 | the same kernel on the slave, over USB CDC |
+| 5 | the microSD, served over the link |
+| 6 | the shell on HDMI, answering a keyboard |
+
+Phase 2 is the one that mattered. It was meant to confirm that ARM exclusives
+work in PSRAM where RISC-V's do not; it showed the opposite, and it showed it
+before a single line of the port had been written.
+
+## Known limits
+
+- **Kernel-mode MPU faults are not survivable.** MemManage runs at the same
+  priority as SVCall and PendSV so that the return-to-user path is safe (0006);
+  the cost is that a fault taken while the kernel is at that priority escalates
+  to HardFault and stops. That is the right trade for a kernel bug, but it also
+  means `copy_to_kernel_nofault` is not usable here.
+- **`STRICT_KERNEL_RWX` is implemented for PMSAv8 only.** On PMSAv7
+  `mark_rodata_ro()` says so rather than silently doing nothing.
+- **The USB HID path is not machine-tested.** A keyboard enumerates and the
+  harness types through the identical path from `terminal_feed_event()` onward,
+  but nothing here can press a physical key.
+- **A user process can still fault on its own heap once memory is exhausted.**
+  Seen with leaked allocations under 8 MB; the addresses are inside a region the
+  MPU grants, so this is not the MPU, and it is not yet attributed.
 
 ## Credits
 
