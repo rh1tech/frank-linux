@@ -27,8 +27,9 @@ a shared libc is what makes 8 MB of RAM hold a usable userspace at all (F8).
   |  8 MB PSRAM @ 0x11000000    | 96   |  core1: HSTX DVI scanout       |
   |    = system RAM             | MiB/s|  Protea terminal engine        |
   |  16 MB flash @ 0x10000000   |      |  8 MB PSRAM: free              |
-  |    = afboot + kernel + DTB  |      +--------------------------------+
-  |  USB CDC = debug console    |         HDMI J5   USB-C J8   uSD J7
+  |    = afboot + DTB + kernel  |      +--------------------------------+
+  |      + rootfs, run in place |         HDMI J5   USB-C J8   uSD J7
+  |  USB CDC = debug console    |
   +-----------------------------+
 ```
 
@@ -45,8 +46,9 @@ See [docs/hw-findings.md](docs/hw-findings.md) F3.
 ## Status
 
 **Done. Linux runs on the RP2350's Cortex-M33, with an HDMI console, a USB
-keyboard and a microSD — all served by the second RP2350 over the link — and a
-PMSAv8 MPU enforcing kernel/user separation and read-only kernel text.**
+keyboard and a microSD — all served by the second RP2350 over the link — a
+PMSAv8 MPU enforcing kernel/user separation and read-only kernel text, and a
+root filesystem executed in place out of flash.**
 
 ```
 ~ # cat /proc/cpuinfo
@@ -57,11 +59,11 @@ Hardware        : RP2350 (Device Tree Support)
 ```
 
 ```
-buildroot login: root
+FRANK Linux v1.00
+frank login: root
 ~ # echo FRANK_KEYS_OK; uname -m
 FRANK_KEYS_OK
 armv7ml
-~ # mount -o ro /dev/frankblk0p1 /mnt/sd
 ~ # ls /mnt/sd
 286  386  APPLE  C64  CMOS.ROM  DOOM  GENESIS  HERETIC
 KICKSTART  MSX  QUAKE  SNES  XT  ZX  cpc
@@ -85,6 +87,23 @@ MPUTEST kernel 0x1125a000 FAULTED sig=11
 MPUTEST RESULT protected
 ```
 
+The root filesystem is romfs in the QSPI flash, mounted straight off an MTD with
+no block device in the way — which is what lets the kernel hand a process a
+direct mapping of flash and run the code from there. Nothing is copied:
+
+```
+~ # cat /proc/self/maps
+10819000-1081e000 r-xp  /lib/ld-uClibc-1.0.52.so   <- 0x10.. is flash
+1081f000-10876000 r-xp  /lib/libuClibc-1.0.52.so
+1096e000-109ce000 r-xp  /bin/busybox
+11668000-11670000 rw-p  [stack]                    <- 0x11.. is RAM
+```
+
+Every executable page is in the flash window; only writable data occupies RAM.
+BusyBox's 384 kB of text costs nothing to run, and 750 kB of libc and shell text
+that used to be resident is now not. On a machine with 8 MB that is the
+difference between a userspace and a demonstration.
+
 The console is served by core 1: the kernel writes bytes into a ring in SRAM and
 core 1 fans them out to USB CDC and, over the link, to the master's terminal.
 The USB console stays live alongside HDMI, which is the rule the whole project
@@ -93,7 +112,7 @@ debugged.
 
 ### Kernel patches
 
-Seven, in `br-external/patches/linux/`. Five make the port exist; two are gaps in
+Nine, in `br-external/patches/linux/`. Five make the port exist; four are gaps in
 mainline that only show up once an MPU is switched on.
 
 | | |
@@ -105,6 +124,8 @@ mainline that only show up once an MPU is switched on.
 | `0005` | device tree for this board |
 | `0006` | **deliver a signal on an MPU fault.** Mainline points the MemManage vector at `__invalid_entry`, which prints a register dump and then spins forever — so with `ARM_MPU` on, the first stray user pointer stops the machine |
 | `0007` | **`STRICT_KERNEL_RWX` on PMSAv8.** `ARCH_HAS_STRICT_KERNEL_RWX` is offered only when there is an MMU, so every NOMMU kernel claimed to have no kernel memory protection whether or not its MPU was on |
+| `0008` | **an executable region for the flash.** `pmsav8_setup_io()` maps everything that is not RAM as execute-never device memory, so a romfs in flash mounts, reports success, and dies at the first instruction fetch. Mapping it read-only also turned out to be what stops a stray store becoming a QSPI *write* — which is what had been killing the debug port (F26) |
+| `0009` | peripherals privileged-only, so a wild userspace pointer cannot reach every register on the chip |
 
 `tools/check.sh` — the harness, validated against known-good firmware:
 
@@ -254,6 +275,15 @@ before a single line of the port had been written.
 - **The USB HID path is not machine-tested.** A keyboard enumerates and the
   harness types through the identical path from `terminal_feed_event()` onward,
   but nothing here can press a physical key.
+- **Nothing bounds `/tmp`.** The root is read-only romfs, so `/tmp`, `/run` and
+  `/var` are ramfs — `tmpfs` needs `SHMEM`, which needs an MMU. ramfs takes no
+  `size=`, so a runaway write to `/tmp` consumes the machine's whole 8 MB.
+- **There is no `fork()`, and there will not be one.** NOMMU has no address
+  translation, so a copied process would hold pointers into its parent. `vfork`
+  plus `execve` works and `posix_spawn` is available; anything that needs a real
+  copy of the running process — a subshell, a command substitution — has to
+  re-exec itself instead. That is why the shell is BusyBox `hush`, why `nano`
+  needed patching, and why bash and mc are not here yet.
 - **A user process can still fault on its own heap once memory is exhausted.**
   Seen with leaked allocations under 8 MB; the addresses are inside a region the
   MPU grants, so this is not the MPU, and it is not yet attributed.
