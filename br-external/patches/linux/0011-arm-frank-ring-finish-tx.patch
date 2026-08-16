@@ -1,0 +1,108 @@
+ARM: frank-ring: finish transmitting when the ring fills
+
+start_tx() drains the kfifo into the shared ring and stops when the ring is
+full. Nothing restarts it. There is no transmit interrupt -- writing to the
+ring is the transmission -- and stop_tx() has nothing to do, so bytes left in
+the kfifo wait for the next write to come along and push them.
+
+For a shell that is invisible, because something is always about to print
+again. For a full-screen program it is not. A colour repaint of an 80x25 screen
+is several kilobytes, since every changed cell carries its SGR sequence, so it
+overruns the ring; the tail is left in the kfifo and the bottom of the screen
+never arrives. Midnight Commander then never redraws it, because as far as it
+is concerned those cells were sent -- which is exactly what it looked like: two
+panels drawn, the right one and the function-key bar missing, and no amount of
+refreshing bringing them back.
+
+The receive poll is already running whenever the port is open, so it drains the
+transmit side too. No new timer, no new state, and the ring gets emptied at the
+same cadence it gets filled.
+
+Found when the terminal was given a colour terminfo entry, which roughly
+doubled the size of a repaint and pushed it past the ring.
+
+--- a/arch/arm/mach-rp2350/frank-ring.c
++++ b/arch/arm/mach-rp2350/frank-ring.c
+@@ -138,6 +138,9 @@
+ 
+ /* ---- uart_port ------------------------------------------------------- */
+ 
++/* Defined below, next to start_tx(), but needed by the poll above it. */
++static void frank_ring_tx_drain(struct uart_port *port);
++
+ static void frank_ring_rx_poll(struct timer_list *t)
+ {
+ 	struct frank_ring_port *fp = from_timer(fp, t, rx_timer);
+@@ -151,6 +154,29 @@
+ 	}
+ 	tty_flip_buffer_push(&fp->port.state->port);
+ 
++	/*
++	 * And push whatever is still waiting to go out.
++	 *
++	 * start_tx() stops when the ring fills, and without this nothing ever
++	 * calls it again: there is no transmit interrupt, and stop_tx() has
++	 * nothing to do. The bytes left in the kfifo then sit there until the
++	 * next write happens to come along.
++	 *
++	 * That is invisible for a shell, where something is always about to
++	 * print again, and very visible for a full-screen program. A colour
++	 * repaint of an 80x25 screen is several kilobytes -- every changed cell
++	 * carries its SGR sequence -- so it overruns the ring, the tail is left
++	 * in the kfifo, and the bottom of the screen simply never arrives.
++	 * Midnight Commander then never repaints it, because as far as it is
++	 * concerned those cells were already sent.
++	 *
++	 * This timer is already running for receive, so draining here costs
++	 * nothing and needs no new state.
++	 */
++	uart_port_lock(&fp->port);
++	frank_ring_tx_drain(&fp->port);
++	uart_port_unlock(&fp->port);
++
+ 	if (fp->running)
+ 		mod_timer(&fp->rx_timer,
+ 			  jiffies + msecs_to_jiffies(FRANK_RING_POLL_MS));
+@@ -161,24 +187,32 @@
+ 	return ring_used(port->membase + SH_TX) ? 0 : TIOCSER_TEMT;
+ }
+ 
+-static void frank_ring_start_tx(struct uart_port *port)
++/*
++ * Move whatever fits from the kfifo into the ring.
++ *
++ * uart_fifo_get() is the current interface; uart_circ_empty() and
++ * port->state->xmit that older serial drivers use were removed, and reaching
++ * for them is how this first failed to build.
++ *
++ * This stops when the ring is full, and nothing else will restart it: there is
++ * no transmit interrupt to hook, because writing to the ring *is* the
++ * transmission. Whatever is left stays in the kfifo until someone calls again,
++ * which is why the receive poll does.
++ */
++static void frank_ring_tx_drain(struct uart_port *port)
+ {
+ 	void __iomem *tx = port->membase + SH_TX;
+ 	unsigned char ch;
+ 
+-	/*
+-	 * Drain the kfifo straight into the ring. uart_fifo_get() is the
+-	 * current interface; uart_circ_empty() and port->state->xmit that older
+-	 * serial drivers use were removed, and reaching for them is how this
+-	 * first failed to build.
+-	 *
+-	 * No interrupt is needed on completion: writing to the ring is the
+-	 * transmission, and core 1 picks it up on its next pass.
+-	 */
+ 	while (ring_space(tx) && uart_fifo_get(port, &ch))
+ 		ring_put(tx, &ch, 1);
+ }
+ 
++static void frank_ring_start_tx(struct uart_port *port)
++{
++	frank_ring_tx_drain(port);
++}
++
+ static void frank_ring_stop_tx(struct uart_port *port) { }
+ static void frank_ring_stop_rx(struct uart_port *port)
+ {
