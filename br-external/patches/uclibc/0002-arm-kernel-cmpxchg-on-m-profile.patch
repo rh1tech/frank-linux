@@ -38,7 +38,7 @@ to apply blindly to every Cortex-M.
 
 --- a/libc/sysdeps/linux/arm/bits/atomic.h
 +++ b/libc/sysdeps/linux/arm/bits/atomic.h
-@@ -71,7 +71,68 @@
+@@ -71,7 +71,75 @@
  #define __arch_compare_and_exchange_val_16_acq(mem, newval, oldval) \
    ({ __arm_link_error (); oldval; })
  
@@ -51,12 +51,12 @@ to apply blindly to every Cortex-M.
 + * memory behind the QSPI interface. STREX there does not fail in a way that
 + * can be retried; it never succeeds. A compare-exchange retry loop therefore
 + * spins forever the first time a mutex is taken, which stops the first process
-+ * before it prints anything.
++ * before it has printed anything.
 + *
 + * The kernel has the same problem and solves it by masking interrupts around a
 + * plain load and store, which is atomic on a uniprocessor. Userspace cannot
-+ * mask interrupts, so it asks the kernel to do it: __ARM_NR_cmpxchg, present
-+ * when the kernel is built with CONFIG_ARM_NO_EXCLUSIVES.
++ * mask interrupts, so it asks the kernel to: __ARM_NR_cmpxchg, present when the
++ * kernel is built with CONFIG_ARM_NO_EXCLUSIVES.
 + *
 + * This is the same arrangement as the __kuser_cmpxchg branches below, which
 + * exist for pre-ARMv6 cores that likewise had no usable exclusives. Those call
@@ -64,7 +64,7 @@ to apply blindly to every Cortex-M.
 + * these parts have none, so it is a syscall instead.
 + *
 + * The cost is a syscall per contended-path atomic. That is the price of the
-+ * hardware, and it is not the expensive part of anything this runs.
++ * hardware, and nothing this runs is bottlenecked on atomics.
 + */
 +static __inline__ int
 +__arm_kernel_cmpxchg (unsigned int __oldval, unsigned int __newval,
@@ -78,10 +78,10 @@ to apply blindly to every Cortex-M.
 +     header of its own.  */
 +  unsigned int __nr = 0x0ffff0;
 +
-+  /* r7 is saved and restored around the call, through ip, for the same reason
++  /* r7 is saved and restored through ip for the same reason
 +     INTERNAL_SYSCALL_NCS does it in bits/syscalls.h: r7 is the frame pointer
 +     in Thumb, and this header is included by translation units built with
-+     flags this one does not control.  */
++     flags it does not control.  */
 +  __asm__ __volatile__ ("mov\tip, r7\n\t"
 +			"mov\tr7, %[nr]\n\t"
 +			"svc\t#0\n\t"
