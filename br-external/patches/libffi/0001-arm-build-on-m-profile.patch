@@ -1,0 +1,154 @@
+arm: build on M-profile, as a libffi that refuses to work
+
+libffi has no Cortex-M port. src/arm/sysv.S is written in ARM mode, which
+M-profile does not have at all:
+
+  ../src/arm/sysv.S:104: Error: selected processor does not support ARM opcodes
+
+and switching it to Thumb -- the file has a Thumb path already, used by Windows
+on ARM -- gets further and then stops on things that are not a mode question:
+
+  Error: selected processor does not support `stc p11,cr0,[sp],{16}' in Thumb mode
+  Error: selected processor does not support `ldc p10,cr0,[r2]' in Thumb mode
+  Error: cannot honor width suffix -- `ldr pc,1f'
+  Error: invalid Hi register with immediate
+
+The VFP save and restore are spelled as coprocessor loads and stores so they
+assemble without -mfpu, and that form does not exist on M-profile in either
+mode. The closure path builds its trampoline as machine code at run time.
+Porting all of it is a real piece of work, and this is not it.
+
+What this does is make libffi build. On M-profile the assembly compiles to
+nothing and every C entry point returns FFI_BAD_ABI -- present, so the failure
+is a return value where libffi is called rather than an undefined symbol at
+link time in an unrelated package, and immediate, so nothing proceeds on a
+half-prepared cif. ffi_call() cannot report a failure through its signature and
+aborts instead; returning quietly would leave the caller reading an
+uninitialised return value.
+
+The reason for wanting that: glib needs libffi only for gobject's generic
+closure marshaller. A program that links glib-2.0 and gmodule-2.0 without
+touching GObject -- Midnight Commander, for one -- never calls any of these.
+Without this, glib cannot be configured on the target and neither can anything
+below it.
+
+No other ARM target changes: __ARM_ARCH_ISA_ARM is defined wherever A32 exists.
+
+Upstream status: not submitted. Upstream would want the port, not this.
+
+--- a/src/arm/sysv.S
++++ b/src/arm/sysv.S
+@@ -26,6 +26,28 @@
+    ----------------------------------------------------------------------- */
+ 
+ #ifdef __arm__
++
++/* M-profile (Cortex-M) has no A32 instruction set, and libffi has no port to
++ * it: everything below is written in ARM mode, and the parts that are not --
++ * the VFP save and restore -- are spelled as coprocessor loads and stores
++ * (stc/ldc p10, p11), a form the assembler rejects on M-profile whichever mode
++ * it is in. The closure path additionally builds its trampoline as machine
++ * code at run time.
++ *
++ * Porting that is a real piece of work and is not attempted here. What this
++ * does instead is make the file empty on M-profile, so libffi builds and
++ * installs, and src/arm/ffi.c returns FFI_BAD_ABI from every entry point. A
++ * caller that actually uses libffi finds out immediately and by return value.
++ *
++ * The reason for wanting a libffi that builds but does not work: glib needs it
++ * only for gobject's generic closure marshaller, and a program that links
++ * glib-2.0 and gmodule-2.0 without touching GObject -- Midnight Commander, for
++ * one -- never reaches a single one of these functions. Without this, glib
++ * cannot be configured at all and neither can anything downstream of it.
++ */
++#ifndef __ARM_ARCH_ISA_ARM
++	/* Nothing. See above. */
++#else
+ #define LIBFFI_ASM
+ #include <fficonfig.h>
+ #include <ffi.h>
+@@ -449,6 +471,7 @@
+ ARM_FUNC_END(ffi_arm_trampoline)
+ 
+ #endif /* FFI_EXEC_TRAMPOLINE_TABLE */
++#endif /* __ARM_ARCH_ISA_ARM */
+ #endif /* __arm__ */
+ 
+ #if defined __ELF__ && defined __linux__
+--- a/src/arm/ffi.c
++++ b/src/arm/ffi.c
+@@ -37,6 +37,67 @@
+ #include <tramp.h>
+ #include "internal.h"
+ 
++#ifndef __ARM_ARCH_ISA_ARM
++/* M-profile: there is no port. See the note at the top of src/arm/sysv.S for
++ * what stands in the way and why a libffi that refuses to work is still worth
++ * building.
++ *
++ * Every entry point is present and returns FFI_BAD_ABI, so the failure arrives
++ * as a return value where libffi is used rather than as an undefined symbol at
++ * link time in some unrelated package. ffi_call() has no way to report a
++ * failure, so it aborts: returning silently would leave the caller reading an
++ * uninitialised return value, which is worse than stopping.
++ */
++
++ffi_status FFI_HIDDEN
++ffi_prep_cif_machdep (ffi_cif *cif)
++{
++  (void) cif;
++  return FFI_BAD_ABI;
++}
++
++ffi_status FFI_HIDDEN
++ffi_prep_cif_machdep_var (ffi_cif *cif, unsigned int nfixedargs,
++                          unsigned int ntotalargs)
++{
++  (void) cif; (void) nfixedargs; (void) ntotalargs;
++  return FFI_BAD_ABI;
++}
++
++void
++ffi_call (ffi_cif *cif, void (*fn) (void), void *rvalue, void **avalue)
++{
++  (void) cif; (void) fn; (void) rvalue; (void) avalue;
++  abort ();
++}
++
++void
++ffi_call_go (ffi_cif *cif, void (*fn) (void), void *rvalue, void **avalue,
++             void *closure)
++{
++  (void) cif; (void) fn; (void) rvalue; (void) avalue; (void) closure;
++  abort ();
++}
++
++ffi_status
++ffi_prep_closure_loc (ffi_closure *closure, ffi_cif *cif,
++                      void (*fun) (ffi_cif *, void *, void **, void *),
++                      void *user_data, void *codeloc)
++{
++  (void) closure; (void) cif; (void) fun; (void) user_data; (void) codeloc;
++  return FFI_BAD_ABI;
++}
++
++ffi_status
++ffi_prep_go_closure (ffi_go_closure *closure, ffi_cif *cif,
++                     void (*fun) (ffi_cif *, void *, void **, void *))
++{
++  (void) closure; (void) cif; (void) fun;
++  return FFI_BAD_ABI;
++}
++
++#else
++
+ #if defined(_WIN32)
+ #define WIN32_LEAN_AND_MEAN
+ #include <windows.h>
+@@ -918,4 +979,6 @@
+ }
+ #endif
+ 
++#endif /* __ARM_ARCH_ISA_ARM */
++
+ #endif /* __arm__ or _M_ARM */
