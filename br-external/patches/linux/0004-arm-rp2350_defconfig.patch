@@ -45,7 +45,15 @@ stack is pure overhead in 8 MB.
 +CONFIG_DRAM_SIZE=0x800000
 +# CONFIG_ATAGS is not set
 +# CONFIG_SUSPEND is not set
-+# CONFIG_BLOCK is not set
++# The block layer is on: the microSD lives on the other half of the board and
++# reaches Linux over the link, which is the whole point of frank-blk. mps2's
++# defconfig turns BLOCK off because that board has no storage at all.
++CONFIG_BLOCK=y
++CONFIG_FRANK_LINK_BLOCK=y
++CONFIG_EXT4_FS=y
++CONFIG_VFAT_FS=y
++CONFIG_NLS_CODEPAGE_437=y
++CONFIG_NLS_ISO8859_1=y
 +CONFIG_BINFMT_ELF_FDPIC=y
 +# CONFIG_COREDUMP is not set
 +# CONFIG_VM_EVENT_COUNTERS is not set

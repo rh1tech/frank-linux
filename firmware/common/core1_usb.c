@@ -151,11 +151,22 @@ bool frank_console_ready(void)
     return FRANK_RING_SHARED->reserved != 0;
 }
 
+/*
+ * Optional block service, linked in only where storage is wanted. Weak symbols
+ * so the console-only builds -- the hardware tests, and afboot before the
+ * kernel exists -- do not have to drag in the link and its PIO programs.
+ */
+__attribute__((weak)) void frank_blk_init(void) { }
+__attribute__((weak)) void frank_blk_service(void) { }
+
 void __not_in_flash_func(core1_usb_main)(void)
 {
     tusb_init();
-    for (;;)
+    frank_blk_init();
+    for (;;) {
         service_once();
+        frank_blk_service();
+    }
 }
 
 /*

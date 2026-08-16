@@ -22,12 +22,19 @@ project(afboot-rp2350 C CXX ASM)
 set(CMAKE_C_STANDARD 11)
 pico_sdk_init()
 
+# core1_blk and the link go in here, not into some later component: afboot is
+# what launches core 1, and that core keeps running underneath Linux for the
+# life of the system. Whatever core 1 will ever need has to be in this binary.
 add_executable(afboot-rp2350
     src/main.c
     ${FW_ROOT}/common/core1_usb.c
+    ${FW_ROOT}/common/core1_blk.c
     ${FW_ROOT}/common/usb_descriptors.c
+    ${FW_ROOT}/common/link_bus.c
     ${HWTESTS_ROOT}/common/psram_init.c
 )
+
+pico_generate_pio_header(afboot-rp2350 ${FW_ROOT}/common/link_bus.pio)
 
 target_include_directories(afboot-rp2350 PRIVATE
     src
@@ -47,6 +54,8 @@ target_link_libraries(afboot-rp2350
     pico_stdlib
     pico_multicore
     hardware_clocks
+    hardware_dma
+    hardware_pio
     hardware_gpio
     hardware_sync
     hardware_vreg

@@ -19,14 +19,6 @@ firing and would silently stop the tick rather than fail.
 
 frank-ring is the kernel end of the console. The RP2350's USB controller has no
 Linux driver, so core 1 runs a TinyUSB CDC device and moves bytes through two
-rings in SRAM; this driver is a polled tty that knows nothing about USB. There
-is no locking because each ring has one producer and one consumer on fixed,
-different cores -- necessary rather than tidy, since with ARM_NO_EXCLUSIVES the
-kernel's atomics are interrupt-masked and protect nothing against core 1. Only
-the ordering matters, and it is explicit. Console writes are bounded rather than
-blocking: core 1 stops draining when no USB host is reading, and wedging the
-machine because nobody is watching would be worse than dropping output.
-
 --- a/arch/arm/Kconfig
 +++ b/arch/arm/Kconfig
 @@ -437,6 +437,8 @@
@@ -50,7 +42,7 @@ machine because nobody is watching would be worse than dropping output.
  machine-$(CONFIG_PLAT_SAMSUNG)		+= s3c
 --- /dev/null
 +++ b/arch/arm/mach-rp2350/Kconfig
-@@ -0,0 +1,41 @@
+@@ -0,0 +1,53 @@
 +# SPDX-License-Identifier: GPL-2.0-only
 +menuconfig ARCH_RP2350
 +	bool "Raspberry Pi RP2350 (Cortex-M33)"
@@ -58,6 +50,7 @@ machine because nobody is watching would be worse than dropping output.
 +	select ARM_NO_EXCLUSIVES
 +	select CLKSRC_RP2350
 +	select FRANK_RING_CONSOLE
++	select FRANK_LINK_BLOCK if BLOCK
 +	help
 +	  Support for the Arm side of the Raspberry Pi RP2350, a dual
 +	  Cortex-M33 with no MMU, running Linux out of external QSPI PSRAM.
@@ -91,14 +84,26 @@ machine because nobody is watching would be worse than dropping output.
 +	  single-producer/single-consumer rings in SRAM. This driver is the
 +	  kernel end of that: a polled tty with no knowledge of USB at all.
 +
++config FRANK_LINK_BLOCK
++	bool "Block device over the inter-chip link"
++	depends on BLOCK
++	help
++	  The half of the FRANK Core 2 Proto that runs Linux has no storage
++	  attached: the microSD is on the other RP2350. Core 1 forwards block
++	  requests over the parallel link, and this is the kernel end.
++
++	  Says nothing about the medium -- the far side may be a card, a RAM
++	  disk, or anything else the master chooses to serve.
++
 +endif
 --- /dev/null
 +++ b/arch/arm/mach-rp2350/Makefile
-@@ -0,0 +1,4 @@
+@@ -0,0 +1,5 @@
 +# SPDX-License-Identifier: GPL-2.0-only
 +obj-y					+= board-dt.o
 +obj-$(CONFIG_CLKSRC_RP2350)		+= timer-rp2350.o
 +obj-$(CONFIG_FRANK_RING_CONSOLE)	+= frank-ring.o
++obj-$(CONFIG_FRANK_LINK_BLOCK)		+= frank-blk.o
 --- /dev/null
 +++ b/arch/arm/mach-rp2350/board-dt.c
 @@ -0,0 +1,20 @@
@@ -731,4 +736,284 @@ machine because nobody is watching would be worse than dropping output.
 +module_exit(frank_ring_exit);
 +
 +MODULE_DESCRIPTION("Console over the RP2350 core-1 SRAM ring");
++MODULE_LICENSE("GPL");
+--- /dev/null
++++ b/arch/arm/mach-rp2350/frank-blk.c
+@@ -0,0 +1,277 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Block device served by core 1 over the inter-chip link.
++ *
++ * Copyright (c) 2026 Mikhail Matveev <xtreme@rh1.tech>
++ *
++ * The half that runs Linux has no storage attached to it at all -- the microSD
++ * is on the master's SPI0. So a read here is: this driver -> a descriptor in
++ * SRAM -> core 1 -> the link -> the master -> the card, and back.
++ *
++ * The kernel's buffer is passed by physical address and core 1 reads and writes
++ * it directly. On a machine with no MMU that address is the one everybody uses,
++ * PSRAM is visible to both cores, and CPU/DMA coherence there is confirmed --
++ * so there is no bounce buffer and no copy on this side.
++ *
++ * Requests are executed synchronously from a workqueue. Core 1 signals
++ * completion by writing a sequence number, and there is no cross-core interrupt
++ * to wait on, so the alternative to polling would be inventing a doorbell for
++ * a device whose round-trip is already hundreds of microseconds.
++ */
++
++#include <linux/blk-mq.h>
++#include <linux/blkdev.h>
++#include <linux/delay.h>
++#include <linux/io.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/of_address.h>
++#include <linux/platform_device.h>
++
++#define FRANK_RING_MAGIC	0x474e5246u
++#define FRANK_RING_BYTES	2048u
++
++/* Offsets in the shared block; must match firmware/common/frank_ring.h. */
++#define SH_MAGIC		0x00
++#define SH_TX			0x10
++#define SH_RX			(SH_TX + 8 + FRANK_RING_BYTES)
++#define SH_BLK			(SH_RX + 8 + FRANK_RING_BYTES)
++
++#define BLK_SEQ			(SH_BLK + 0x00)
++#define BLK_DONE		(SH_BLK + 0x04)
++#define BLK_OP			(SH_BLK + 0x08)
++#define BLK_LBA			(SH_BLK + 0x0c)
++#define BLK_COUNT		(SH_BLK + 0x10)
++#define BLK_ADDR		(SH_BLK + 0x14)
++#define BLK_STATUS		(SH_BLK + 0x18)
++#define BLK_CAPACITY		(SH_BLK + 0x1c)
++
++#define FRANK_BLK_OP_READ	0u
++#define FRANK_BLK_OP_WRITE	1u
++#define FRANK_BLK_SECTOR	512u
++#define FRANK_BLK_MAX_SECTORS	8u
++
++/*
++ * How long to wait for core 1. Deliberately generous: the master's control
++ * round-trip is 141 us idle but 2753 us once its USB HID host is running, so a
++ * timeout that looks sane on a quiet bench would start failing the moment a
++ * keyboard is plugged into the other half.
++ */
++#define FRANK_BLK_TIMEOUT_MS	2000
++
++struct frank_blk {
++	void __iomem		*base;
++	struct gendisk		*disk;
++	struct blk_mq_tag_set	tag_set;
++	struct mutex		lock;
++	u32			seq;
++	sector_t		capacity;
++};
++
++static struct frank_blk *frank_blk;
++
++static int frank_blk_submit(struct frank_blk *fb, u32 op, sector_t lba,
++			    u32 count, void *buf)
++{
++	unsigned long deadline;
++	u32 seq;
++	s32 status;
++
++	mutex_lock(&fb->lock);
++
++	seq = ++fb->seq;
++	writel_relaxed(op, fb->base + BLK_OP);
++	writel_relaxed((u32)lba, fb->base + BLK_LBA);
++	writel_relaxed(count, fb->base + BLK_COUNT);
++	writel_relaxed((u32)virt_to_phys(buf), fb->base + BLK_ADDR);
++
++	/* Publish the descriptor before the sequence that announces it. */
++	dmb(ish);
++	writel_relaxed(seq, fb->base + BLK_SEQ);
++
++	deadline = jiffies + msecs_to_jiffies(FRANK_BLK_TIMEOUT_MS);
++	while (readl_relaxed(fb->base + BLK_DONE) != seq) {
++		if (time_after(jiffies, deadline)) {
++			mutex_unlock(&fb->lock);
++			pr_err_ratelimited("frank-blk: timeout on %s lba %llu\n",
++					   op == FRANK_BLK_OP_READ ? "read" : "write",
++					   (unsigned long long)lba);
++			return -ETIMEDOUT;
++		}
++		cpu_relax();
++	}
++
++	/* Read status only after observing the completion that publishes it. */
++	dmb(ish);
++	status = (s32)readl_relaxed(fb->base + BLK_STATUS);
++
++	mutex_unlock(&fb->lock);
++	return status;
++}
++
++static blk_status_t frank_blk_queue_rq(struct blk_mq_hw_ctx *hctx,
++				       const struct blk_mq_queue_data *bd)
++{
++	struct request *req = bd->rq;
++	struct frank_blk *fb = req->q->queuedata;
++	struct bio_vec bvec;
++	struct req_iterator iter;
++	sector_t lba = blk_rq_pos(req);
++	int err = 0;
++
++	blk_mq_start_request(req);
++
++	if (req_op(req) != REQ_OP_READ && req_op(req) != REQ_OP_WRITE) {
++		blk_mq_end_request(req, BLK_STS_NOTSUPP);
++		return BLK_STS_OK;
++	}
++
++	rq_for_each_segment(bvec, req, iter) {
++		void *buf = page_address(bvec.bv_page) + bvec.bv_offset;
++		u32 sectors = bvec.bv_len / FRANK_BLK_SECTOR;
++		u32 done = 0;
++
++		/* Split at the wire's maximum. The kernel merges freely and a
++		 * segment can be far larger than one link transfer. */
++		while (done < sectors && !err) {
++			u32 chunk = min(sectors - done, FRANK_BLK_MAX_SECTORS);
++
++			err = frank_blk_submit(fb,
++					       req_op(req) == REQ_OP_READ ?
++					       FRANK_BLK_OP_READ : FRANK_BLK_OP_WRITE,
++					       lba + done, chunk,
++					       buf + done * FRANK_BLK_SECTOR);
++			done += chunk;
++		}
++		lba += sectors;
++		if (err)
++			break;
++	}
++
++	blk_mq_end_request(req, err ? BLK_STS_IOERR : BLK_STS_OK);
++	return BLK_STS_OK;
++}
++
++static const struct blk_mq_ops frank_blk_mq_ops = {
++	.queue_rq = frank_blk_queue_rq,
++};
++
++static const struct block_device_operations frank_blk_fops = {
++	.owner = THIS_MODULE,
++};
++
++static int frank_blk_probe(struct platform_device *pdev)
++{
++	struct queue_limits lim = {
++		.logical_block_size	= FRANK_BLK_SECTOR,
++		.physical_block_size	= FRANK_BLK_SECTOR,
++		.max_hw_sectors		= FRANK_BLK_MAX_SECTORS,
++		.max_segments		= 1,
++	};
++	struct frank_blk *fb;
++	struct resource *res;
++	u32 capacity;
++	int ret;
++
++	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
++	if (!res)
++		return -ENODEV;
++
++	fb = devm_kzalloc(&pdev->dev, sizeof(*fb), GFP_KERNEL);
++	if (!fb)
++		return -ENOMEM;
++
++	fb->base = devm_ioremap(&pdev->dev, res->start, resource_size(res));
++	if (!fb->base)
++		return -ENOMEM;
++
++	if (readl_relaxed(fb->base + SH_MAGIC) != FRANK_RING_MAGIC) {
++		dev_err(&pdev->dev, "no shared block -- is core 1 running?\n");
++		return -ENODEV;
++	}
++
++	/*
++	 * Core 1 publishes the capacity after asking the master. Zero means the
++	 * master did not answer, and registering a disk that cannot be read
++	 * would only produce I/O errors later with no explanation.
++	 */
++	capacity = readl_relaxed(fb->base + BLK_CAPACITY);
++	if (!capacity) {
++		dev_info(&pdev->dev,
++			 "no storage offered by the master; not registering\n");
++		return -ENODEV;
++	}
++
++	mutex_init(&fb->lock);
++	fb->capacity = capacity;
++
++	fb->tag_set.ops = &frank_blk_mq_ops;
++	fb->tag_set.nr_hw_queues = 1;
++	fb->tag_set.queue_depth = 4;
++	fb->tag_set.numa_node = NUMA_NO_NODE;
++	fb->tag_set.cmd_size = 0;
++	fb->tag_set.flags = BLK_MQ_F_BLOCKING;
++
++	ret = blk_mq_alloc_tag_set(&fb->tag_set);
++	if (ret)
++		return ret;
++
++	fb->disk = blk_mq_alloc_disk(&fb->tag_set, &lim, fb);
++	if (IS_ERR(fb->disk)) {
++		ret = PTR_ERR(fb->disk);
++		goto out_tagset;
++	}
++
++	fb->disk->major = 0;
++	fb->disk->first_minor = 0;
++	fb->disk->minors = 8;
++	fb->disk->fops = &frank_blk_fops;
++	fb->disk->private_data = fb;
++	snprintf(fb->disk->disk_name, DISK_NAME_LEN, "frankblk0");
++	set_capacity(fb->disk, capacity);
++
++	ret = add_disk(fb->disk);
++	if (ret)
++		goto out_disk;
++
++	frank_blk = fb;
++	platform_set_drvdata(pdev, fb);
++	dev_info(&pdev->dev, "%u sectors (%u KiB) over the link\n",
++		 capacity, capacity / 2);
++	return 0;
++
++out_disk:
++	put_disk(fb->disk);
++out_tagset:
++	blk_mq_free_tag_set(&fb->tag_set);
++	return ret;
++}
++
++static void frank_blk_remove(struct platform_device *pdev)
++{
++	struct frank_blk *fb = platform_get_drvdata(pdev);
++
++	del_gendisk(fb->disk);
++	put_disk(fb->disk);
++	blk_mq_free_tag_set(&fb->tag_set);
++}
++
++static const struct of_device_id frank_blk_of_match[] = {
++	{ .compatible = "frank,link-block" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, frank_blk_of_match);
++
++static struct platform_driver frank_blk_driver = {
++	.probe	= frank_blk_probe,
++	.remove	= frank_blk_remove,
++	.driver	= {
++		.name		= "frank-blk",
++		.of_match_table	= frank_blk_of_match,
++	},
++};
++
++module_platform_driver(frank_blk_driver);
++
++MODULE_DESCRIPTION("Block device served by RP2350 core 1 over the FRANK link");
 +MODULE_LICENSE("GPL");

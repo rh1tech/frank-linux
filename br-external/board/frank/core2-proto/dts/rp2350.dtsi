@@ -66,9 +66,19 @@
 		 * 0x20080000, which looks like the top of SRAM and is actually
 		 * SCRATCH_X -- core 1's stack (hw-findings F13).
 		 */
+		/*
+		 * Storage, served by core 1 over the link because the microSD
+		 * is on the other half of the board. Same shared block as the
+		 * console -- one region, two users, different offsets.
+		 */
+		storage: link-block@2007e000 {
+			compatible = "frank,link-block";
+			reg = <0x2007e000 0x2000>;
+		};
+
 		console: ring-console@2007e000 {
 			compatible = "frank,ring-console";
-			reg = <0x2007e000 0x1020>;
+			reg = <0x2007e000 0x2000>;
 		};
 	};
 };

@@ -91,6 +91,38 @@ typedef struct {
     volatile uint8_t  data[FRANK_RING_BYTES];
 } frank_ring_t;
 
+/*
+ * Block device request, Linux -> core 1 -> link -> master -> microSD.
+ *
+ * A descriptor and a doorbell rather than a ring, because storage is
+ * request/response with bulk payloads and the data should not be copied through
+ * a 2 kB ring twice. Core 1 reaches the kernel's buffer directly: PSRAM is
+ * visible to both cores and CPU/DMA coherence there is confirmed (F9).
+ *
+ * Submit by filling the fields, barrier, then incrementing `seq`. Complete when
+ * `done == seq`. One producer and one consumer again, so still no locks and
+ * still no atomics -- which stays necessary rather than elegant, because the
+ * kernel's atomics are interrupt-masked and protect nothing against core 1.
+ *
+ * `status` is deliberately separate from `done`: folding them into one word
+ * would make "finished" and "worked" the same bit, and a failed read has to be
+ * distinguishable from a completed one.
+ */
+#define FRANK_BLK_OP_READ   0u
+#define FRANK_BLK_OP_WRITE  1u
+#define FRANK_BLK_SECTOR    512u
+
+typedef struct {
+    volatile uint32_t seq;       /* Linux increments to submit           */
+    volatile uint32_t done;      /* core 1 copies seq here when finished */
+    volatile uint32_t op;
+    volatile uint32_t lba;
+    volatile uint32_t count;     /* sectors                              */
+    volatile uint32_t addr;      /* buffer, physical, in PSRAM           */
+    volatile int32_t  status;    /* 0, or negative errno                 */
+    volatile uint32_t capacity;  /* sectors; core 1 publishes at startup */
+} frank_blk_t;
+
 typedef struct {
     volatile uint32_t magic;
     volatile uint32_t version;
@@ -99,6 +131,8 @@ typedef struct {
 
     frank_ring_t tx;                 /* Linux -> core 1 -> USB host  */
     frank_ring_t rx;                 /* USB host -> core 1 -> Linux  */
+
+    frank_blk_t blk;                 /* Linux -> core 1 -> link -> SD */
 } frank_ring_shared_t;
 
 #define FRANK_RING_SHARED   ((frank_ring_shared_t *)FRANK_RING_BASE)
