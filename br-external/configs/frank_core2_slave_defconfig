@@ -94,11 +94,25 @@ BR2_TARGET_GENERIC_HOSTNAME="frank"
 # BR2_TARGET_ROOTFS_INITRAMFS is not set
 # BR2_TARGET_ROOTFS_TAR is not set
 
-# Wide characters, which is a toolchain rebuild rather than a package option.
+# Locale and wide characters, which are a toolchain rebuild rather than package
+# options.
 #
-# Needed by ncurses' wide build and, downstream, by nano and mc -- Buildroot
-# guards both with `depends on BR2_USE_WCHAR`. uClibc has it off by default.
-BR2_TOOLCHAIN_BUILDROOT_WCHAR=y
+# Wide characters are needed by ncurses' wide build and, downstream, by nano and
+# mc -- Buildroot guards both with `depends on BR2_USE_WCHAR`, and uClibc has it
+# off by default. LOCALE selects WCHAR, so this covers both.
+#
+# Locale is here for a second reason: it is what makes uClibc provide iconv().
+# Without it, glib's `select BR2_PACKAGE_LIBICONV if !BR2_ENABLE_LOCALE` pulls
+# in GNU libiconv, whose staging install does not reliably leave iconv.h in the
+# sysroot here -- glib then configures or compiles depending on the order things
+# happened in, which is not a build, it is a coin toss:
+#
+#   ../glib/gconvert.c:27:10: fatal error: iconv.h: No such file or directory
+#
+# A C library that has iconv removes the package, the question and the failure
+# mode together, and a file manager on a UTF-8 terminal wanted the locale
+# anyway.
+BR2_TOOLCHAIN_BUILDROOT_LOCALE=y
 
 # ncurses, for anything that draws a screen rather than a line.
 BR2_PACKAGE_NCURSES=y
