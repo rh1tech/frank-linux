@@ -1,0 +1,34 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * FRANK Core 2 Proto, slave half (U6, RP2350A) -- the half that runs Linux.
+ *
+ * Copyright (c) 2026 Mikhail Matveev <xtreme@rh1.tech>
+ */
+
+/dts-v1/;
+#include "rp2350.dtsi"
+
+/ {
+	model = "FRANK Core 2 Proto (RP2350A slave)";
+	compatible = "frank,core2-proto-slave", "raspberrypi,rp2350";
+
+	chosen {
+		bootargs = "earlycon console=ttyFRK0";
+		stdout-path = &console;
+	};
+
+	/*
+	 * System RAM is the 8 MB of external PSRAM at the QMI chip-select 1
+	 * window, and nothing else.
+	 *
+	 * The 520 kB of internal SRAM is deliberately absent. It belongs to
+	 * core 1 -- its code, its stack and the console rings -- and listing it
+	 * here would let the kernel allocate on top of them. It is also the one
+	 * region where LDREX/STREX work, which is why core 1's structures live
+	 * there and the kernel's do not.
+	 */
+	memory@11000000 {
+		device_type = "memory";
+		reg = <0x11000000 0x800000>;
+	};
+};

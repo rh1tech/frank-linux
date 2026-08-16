@@ -1,0 +1,55 @@
+#!/bin/sh
+#
+# Strip the target tree.
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Buildroot will not do this for us: BR2_STRIP_strip `depends on BR2_BINFMT_ELF`,
+# and we select BR2_BINFMT_FDPIC, so the whole strip step silently disappears.
+# The option is simply absent from .config -- not set to n, absent -- which is a
+# quiet way to end up shipping debug symbols.
+#
+# On a normal system that would be a size optimisation. On NOMMU it is a
+# correctness one. ramfs there needs one *physically contiguous* allocation per
+# file, so a large file is not merely wasteful, it can be impossible to unpack:
+#
+#   warn_alloc from __alloc_frozen_pages_noprof
+#   __alloc_pages_noprof from ramfs_nommu_expand_for_mapping
+#   ...
+#   unpack_to_rootfs from do_populate_rootfs
+#
+# That is this exact tree failing to extract its own initramfs, because
+# libgcc_s.so.1 was 2.7 MB unstripped -- 71% of the rootfs, and an order-10
+# allocation. Stripped it is 99 kB.
+#
+# --strip-unneeded, not -s: it removes the symbol table while keeping .dynsym,
+# which the dynamic loader needs to resolve anything at all.
+
+set -e
+
+TARGET_DIR="$1"
+[ -n "$TARGET_DIR" ] || { echo "post-build: no target dir given" >&2; exit 1; }
+
+STRIP=""
+for cand in "$HOST_DIR"/bin/*-strip; do
+    [ -x "$cand" ] && { STRIP="$cand"; break; }
+done
+[ -n "$STRIP" ] || { echo "post-build: no cross strip in $HOST_DIR/bin" >&2; exit 1; }
+
+before=$(du -sk "$TARGET_DIR" | cut -f1)
+stripped=0
+
+# Ask `file` what each one is rather than trusting the path or extension: the
+# tree holds shell scripts, symlinks and device nodes alongside the binaries,
+# and strip on a script destroys it.
+find "$TARGET_DIR" -type f -print | while read -r f; do
+    case "$(LC_ALL=C file -b "$f" 2>/dev/null)" in
+        *ELF*executable*|*ELF*shared\ object*)
+            "$STRIP" --strip-unneeded "$f" 2>/dev/null || true
+            ;;
+    esac
+done
+
+after=$(du -sk "$TARGET_DIR" | cut -f1)
+echo "post-build: stripped target, ${before} kB -> ${after} kB"
+exit 0

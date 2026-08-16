@@ -1,9 +1,8 @@
-# Phase 3: ARM NOMMU Linux with FDPIC userspace, under QEMU.
+# Phase 4: ARM NOMMU Linux on the FRANK Core 2 Proto slave half.
 #
-# No hardware involved, deliberately. This is where the toolchain, the C
-# library, the binary format and the atomics patch get proven; the board port
-# then only has to add a machine. It stays a CI target afterwards so kernel
-# changes can be bisected without the board in the loop.
+# Same toolchain, C library and binary format as the QEMU target, which is the
+# point of having had a QEMU target: the only new things here are a machine, a
+# timer, a console and the atomics option actually being switched on.
 
 # Architecture. Buildroot has no cortex-m33, and it does not need one: ARMv8-M
 # Mainline is a superset of ARMv7E-M, so cortex-m4 output runs unmodified on the
@@ -29,23 +28,21 @@ BR2_OPTIMIZE_S=y
 # Stripping is done by our own post-build script, not by BR2_STRIP_strip:
 # that option `depends on BR2_BINFMT_ELF` and we select BR2_BINFMT_FDPIC, so
 # Buildroot's strip step is unavailable and silently absent from .config.
-# See board/frank/qemu-armv7m/post-build.sh for why it matters on NOMMU.
-BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_FRANK_LINUX_PATH)/board/frank/qemu-armv7m/post-build.sh"
+# See board/frank/core2-proto/post-build.sh for why it matters on NOMMU.
+BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_FRANK_LINUX_PATH)/board/frank/core2-proto/post-build.sh"
 
 # Kernel
 BR2_LINUX_KERNEL=y
 BR2_LINUX_KERNEL_CUSTOM_VERSION=y
 BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="6.15"
-BR2_LINUX_KERNEL_DEFCONFIG="mps2"
-BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_FRANK_LINUX_PATH)/board/frank/qemu-armv7m/linux.config"
-# vmlinux, not the ARM default of zImage. QEMU loads an ELF directly and takes
-# the load addresses and entry point from its program headers, which is exactly
-# what a machine with no bootloader needs; zImage would just be a blob with
-# nowhere to say where it goes.
-BR2_LINUX_KERNEL_VMLINUX=y
+BR2_LINUX_KERNEL_DEFCONFIG="rp2350"
+# A raw Image, not vmlinux or zImage. afboot-rp2350 copies it to a fixed address
+# in PSRAM and branches to the start, so it wants bytes rather than an ELF -- and
+# there is no decompressor on the far side to unpack a zImage.
+BR2_LINUX_KERNEL_IMAGE=y
 
 BR2_LINUX_KERNEL_DTS_SUPPORT=y
-BR2_LINUX_KERNEL_INTREE_DTS_NAME="arm/mps2-an385"
+BR2_LINUX_KERNEL_CUSTOM_DTS_PATH="$(BR2_EXTERNAL_FRANK_LINUX_PATH)/board/frank/core2-proto/dts/frank-core2-proto-slave.dts"
 BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_FRANK_LINUX_PATH)/patches"
 
 # Userspace: BusyBox in an initramfs the kernel carries itself.

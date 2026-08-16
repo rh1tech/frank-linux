@@ -1,0 +1,734 @@
+ARM: add ARCH_RP2350 with a TIMER0 clocksource and a core-1 ring console
+
+Machine support for the Arm side of the RP2350, plus the two drivers the board
+cannot boot without. Both drivers live in the machine directory rather than
+under drivers/, so the port touches exactly two existing files.
+
+ARCH_RP2350 selects ARM_NO_EXCLUSIVES rather than offering it. LDREX/STREX on
+this SoC work only in the internal SRAM and never succeed in the PSRAM that
+holds system RAM, and they fail silently rather than faulting -- a kernel built
+without it does not crash, it livelocks in the first cmpxchg with no diagnostic.
+That is not a choice to leave to whoever runs menuconfig.
+
+timer-rp2350 drives TIMER0, a 64-bit 1 MHz counter with four alarms, as both
+clocksource and clockevent. ARMV7M_SYSTICK, which the other v7-M platforms use,
+registers only a clocksource. Alarm 0 is the tick; the other three are left for
+firmware on core 1. set_next_event checks ARMED and re-reads the counter,
+because an alarm programmed for a time that has already passed disarms without
+firing and would silently stop the tick rather than fail.
+
+frank-ring is the kernel end of the console. The RP2350's USB controller has no
+Linux driver, so core 1 runs a TinyUSB CDC device and moves bytes through two
+rings in SRAM; this driver is a polled tty that knows nothing about USB. There
+is no locking because each ring has one producer and one consumer on fixed,
+different cores -- necessary rather than tidy, since with ARM_NO_EXCLUSIVES the
+kernel's atomics are interrupt-masked and protect nothing against core 1. Only
+the ordering matters, and it is explicit. Console writes are bounded rather than
+blocking: core 1 stops draining when no USB host is reading, and wedging the
+machine because nobody is watching would be worse than dropping output.
+
+--- a/arch/arm/Kconfig
++++ b/arch/arm/Kconfig
+@@ -437,6 +437,8 @@
+ 
+ source "arch/arm/mach-realtek/Kconfig"
+ 
++source "arch/arm/mach-rp2350/Kconfig"
++
+ source "arch/arm/mach-rpc/Kconfig"
+ 
+ source "arch/arm/mach-rockchip/Kconfig"
+--- a/arch/arm/Makefile
++++ b/arch/arm/Makefile
+@@ -211,6 +211,7 @@
+ machine-$(CONFIG_ARCH_PXA)		+= pxa
+ machine-$(CONFIG_ARCH_QCOM)		+= qcom
+ machine-$(CONFIG_ARCH_REALTEK)		+= realtek
++machine-$(CONFIG_ARCH_RP2350)		+= rp2350
+ machine-$(CONFIG_ARCH_ROCKCHIP)		+= rockchip
+ machine-$(CONFIG_ARCH_RPC)		+= rpc
+ machine-$(CONFIG_PLAT_SAMSUNG)		+= s3c
+--- /dev/null
++++ b/arch/arm/mach-rp2350/Kconfig
+@@ -0,0 +1,41 @@
++# SPDX-License-Identifier: GPL-2.0-only
++menuconfig ARCH_RP2350
++	bool "Raspberry Pi RP2350 (Cortex-M33)"
++	depends on ARM_SINGLE_ARMV7M
++	select ARM_NO_EXCLUSIVES
++	select CLKSRC_RP2350
++	select FRANK_RING_CONSOLE
++	help
++	  Support for the Arm side of the Raspberry Pi RP2350, a dual
++	  Cortex-M33 with no MMU, running Linux out of external QSPI PSRAM.
++
++	  ARM_NO_EXCLUSIVES is selected rather than offered: LDREX/STREX on
++	  this SoC work only in the internal SRAM and never succeed in the
++	  PSRAM that holds system RAM, and they fail silently rather than
++	  faulting. A kernel built without it does not crash, it livelocks in
++	  the first cmpxchg with no diagnostic at all.
++
++if ARCH_RP2350
++
++config CLKSRC_RP2350
++	bool "RP2350 TIMER0 clocksource and clockevent"
++	select CLKSRC_MMIO
++	help
++	  TIMER0 is a 64-bit microsecond counter with four alarms. The kernel
++	  needs both a clocksource and a clockevent, and ARMV7M_SYSTICK
++	  provides only the former.
++
++config FRANK_RING_CONSOLE
++	bool "Console over the core-1 SRAM ring"
++	select SERIAL_CORE
++	select SERIAL_CORE_CONSOLE
++	help
++	  Console served by the second core rather than by a UART.
++
++	  The RP2350's USB controller has no Linux driver. On the FRANK Core 2
++	  Proto the slave half has no wired UART either, so core 1 runs a
++	  TinyUSB CDC device and exchanges bytes with the kernel through two
++	  single-producer/single-consumer rings in SRAM. This driver is the
++	  kernel end of that: a polled tty with no knowledge of USB at all.
++
++endif
+--- /dev/null
++++ b/arch/arm/mach-rp2350/Makefile
+@@ -0,0 +1,4 @@
++# SPDX-License-Identifier: GPL-2.0-only
++obj-y					+= board-dt.o
++obj-$(CONFIG_CLKSRC_RP2350)		+= timer-rp2350.o
++obj-$(CONFIG_FRANK_RING_CONSOLE)	+= frank-ring.o
+--- /dev/null
++++ b/arch/arm/mach-rp2350/board-dt.c
+@@ -0,0 +1,20 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Raspberry Pi RP2350, Arm side, device-tree only.
++ *
++ * Copyright (c) 2026 Mikhail Matveev <xtreme@rh1.tech>
++ */
++
++#include <linux/kernel.h>
++#include <asm/mach/arch.h>
++#include <asm/v7m.h>
++
++static const char *const rp2350_compat[] __initconst = {
++	"raspberrypi,rp2350",
++	NULL
++};
++
++DT_MACHINE_START(RP2350DT, "RP2350 (Device Tree Support)")
++	.dt_compat	= rp2350_compat,
++	.restart	= armv7m_restart,
++MACHINE_END
+--- /dev/null
++++ b/arch/arm/mach-rp2350/timer-rp2350.c
+@@ -0,0 +1,178 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * RP2350 TIMER0: clocksource and clockevent.
++ *
++ * Copyright (c) 2026 Mikhail Matveev <xtreme@rh1.tech>
++ *
++ * TIMER0 is a 64-bit counter ticking at 1 MHz with four independent alarms.
++ * The kernel needs both a clocksource and a clockevent; ARMV7M_SYSTICK, which
++ * the other v7-M platforms use, provides only the former.
++ *
++ * Alarm 0 drives the tick. The remaining three are left alone so firmware on
++ * core 1 can use them.
++ *
++ * Reading the counter needs care. TIMELR latches the high half when the low
++ * half is read, so the pair must be read low-then-high to be consistent; the
++ * TIMERAWH/TIMERAWL aliases do not latch and would tear across a wrap. The
++ * clocksource here is 32-bit and reads only the low word, which is what
++ * clocksource_mmio wants and is ample at 1 MHz.
++ */
++
++#include <linux/clockchips.h>
++#include <linux/clocksource.h>
++#include <linux/interrupt.h>
++#include <linux/io.h>
++#include <linux/of.h>
++#include <linux/of_address.h>
++#include <linux/of_irq.h>
++#include <linux/sched_clock.h>
++
++#define TIMER_TIMEHR		0x08
++#define TIMER_TIMELR		0x0c
++#define TIMER_ALARM0		0x10
++#define TIMER_ARMED		0x20
++#define TIMER_TIMERAWH		0x24
++#define TIMER_TIMERAWL		0x28
++#define TIMER_INTR		0x3c
++#define TIMER_INTE		0x40
++#define TIMER_INTS		0x48
++
++/*
++ * The shortest delta worth programming. An alarm set to a time that has already
++ * passed never fires, so the clockevent must refuse anything it cannot arm in
++ * time. Ten microseconds is comfortably more than the write takes even with the
++ * core stalled on an XIP miss, which on this SoC costs about ten cycles per
++ * instruction.
++ */
++#define RP2350_MIN_DELTA	10
++#define RP2350_MAX_DELTA	0x7fffffff
++
++static void __iomem *rp2350_timer_base;
++
++static u64 notrace rp2350_read_sched_clock(void)
++{
++	return readl_relaxed(rp2350_timer_base + TIMER_TIMERAWL);
++}
++
++static int rp2350_set_next_event(unsigned long delta,
++				 struct clock_event_device *evt)
++{
++	u32 now, target;
++
++	/* TIMERAWL, not TIMELR: no latching side effects, and we only want the
++	 * low half here. */
++	now = readl_relaxed(rp2350_timer_base + TIMER_TIMERAWL);
++	target = now + (u32)delta;
++
++	writel_relaxed(target, rp2350_timer_base + TIMER_ALARM0);
++
++	/*
++	 * Writing ALARM0 arms it. If the target has already gone by, the alarm
++	 * disarms itself without firing and the tick would simply stop -- so
++	 * check and report -ETIME, which makes the core retry with a larger
++	 * delta rather than hang.
++	 */
++	if (!(readl_relaxed(rp2350_timer_base + TIMER_ARMED) & 1u))
++		return -ETIME;
++
++	now = readl_relaxed(rp2350_timer_base + TIMER_TIMERAWL);
++	if ((s32)(target - now) <= 0) {
++		/* Disarm and let the caller pick a later time. */
++		writel_relaxed(1u, rp2350_timer_base + TIMER_ARMED);
++		return -ETIME;
++	}
++
++	return 0;
++}
++
++static int rp2350_shutdown(struct clock_event_device *evt)
++{
++	/* ARMED is write-one-to-disarm. */
++	writel_relaxed(1u, rp2350_timer_base + TIMER_ARMED);
++	return 0;
++}
++
++static struct clock_event_device rp2350_clockevent = {
++	.name			= "rp2350-timer0",
++	.features		= CLOCK_EVT_FEAT_ONESHOT,
++	.rating			= 300,
++	.set_next_event		= rp2350_set_next_event,
++	.set_state_shutdown	= rp2350_shutdown,
++	.set_state_oneshot	= rp2350_shutdown,
++	.tick_resume		= rp2350_shutdown,
++};
++
++static irqreturn_t rp2350_timer_interrupt(int irq, void *dev_id)
++{
++	struct clock_event_device *evt = dev_id;
++
++	/* INTR is write-one-to-clear, and must be cleared before the handler
++	 * runs or the interrupt re-asserts immediately on return. */
++	writel_relaxed(1u, rp2350_timer_base + TIMER_INTR);
++
++	evt->event_handler(evt);
++	return IRQ_HANDLED;
++}
++
++static int __init rp2350_timer_init(struct device_node *np)
++{
++	unsigned long rate = 1000000;	/* the timer is always 1 MHz */
++	int irq, ret;
++
++	rp2350_timer_base = of_iomap(np, 0);
++	if (!rp2350_timer_base) {
++		pr_err("rp2350-timer: could not map registers\n");
++		return -ENXIO;
++	}
++
++	irq = irq_of_parse_and_map(np, 0);
++	if (!irq) {
++		pr_err("rp2350-timer: no interrupt\n");
++		ret = -EINVAL;
++		goto out_unmap;
++	}
++
++	of_property_read_u32(np, "clock-frequency", (u32 *)&rate);
++
++	/* Disarm and clear anything the bootloader left behind. */
++	writel_relaxed(1u, rp2350_timer_base + TIMER_ARMED);
++	writel_relaxed(1u, rp2350_timer_base + TIMER_INTR);
++
++	ret = clocksource_mmio_init(rp2350_timer_base + TIMER_TIMERAWL,
++				    "rp2350-timer0", rate, 300, 32,
++				    clocksource_mmio_readl_up);
++	if (ret) {
++		pr_err("rp2350-timer: clocksource registration failed\n");
++		goto out_unmap;
++	}
++
++	sched_clock_register(rp2350_read_sched_clock, 32, rate);
++
++	ret = request_irq(irq, rp2350_timer_interrupt,
++			  IRQF_TIMER | IRQF_IRQPOLL, "rp2350-timer0",
++			  &rp2350_clockevent);
++	if (ret) {
++		pr_err("rp2350-timer: could not request irq %d\n", irq);
++		goto out_unmap;
++	}
++
++	/* Enable the alarm 0 interrupt only; the other three stay free for
++	 * whatever core 1 is doing. */
++	writel_relaxed(readl_relaxed(rp2350_timer_base + TIMER_INTE) | 1u,
++		       rp2350_timer_base + TIMER_INTE);
++
++	rp2350_clockevent.cpumask = cpumask_of(0);
++	rp2350_clockevent.irq = irq;
++	clockevents_config_and_register(&rp2350_clockevent, rate,
++					RP2350_MIN_DELTA, RP2350_MAX_DELTA);
++
++	pr_info("rp2350-timer: TIMER0 at %lu Hz, alarm 0 on irq %d\n", rate, irq);
++	return 0;
++
++out_unmap:
++	iounmap(rp2350_timer_base);
++	rp2350_timer_base = NULL;
++	return ret;
++}
++
++TIMER_OF_DECLARE(rp2350_timer, "raspberrypi,rp2350-timer", rp2350_timer_init);
+--- /dev/null
++++ b/arch/arm/mach-rp2350/frank-ring.c
+@@ -0,0 +1,426 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Console over the core-1 SRAM ring.
++ *
++ * Copyright (c) 2026 Mikhail Matveev <xtreme@rh1.tech>
++ *
++ * The RP2350's USB controller has no Linux driver, and on the FRANK Core 2
++ * Proto the slave half has no wired UART either. So core 1 runs a TinyUSB CDC
++ * device and exchanges bytes with the kernel through two rings in SRAM, and
++ * this is the kernel end: a polled tty that knows nothing about USB.
++ *
++ * Each ring has exactly one producer and one consumer, on fixed and different
++ * cores, so there is no locking here and none is needed -- the producer owns
++ * head, the consumer owns tail, and each only reads the other's index.
++ *
++ * That is not a stylistic choice. LDREX/STREX do not work outside SRAM on this
++ * SoC, so the kernel is built with CONFIG_ARM_NO_EXCLUSIVES and its atomics are
++ * interrupt-masked. Those are atomic only against this core and would protect
++ * nothing against core 1. A structure that needs no atomics at all sidesteps
++ * the problem entirely.
++ *
++ * What is required is ordering, and it is not optional:
++ *   producing: store the data, then a barrier, then publish head
++ *   consuming: read head, barrier, read the data, barrier, publish tail
++ *
++ * There is no interrupt from core 1, so RX is polled. At a human typing rate
++ * that is free, and it avoids inventing a cross-core doorbell for a console.
++ */
++
++#include <linux/console.h>
++#include <linux/io.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/of_address.h>
++#include <linux/platform_device.h>
++#include <linux/serial_core.h>
++#include <linux/timer.h>
++#include <linux/tty_flip.h>
++
++#define FRANK_RING_MAGIC	0x474e5246u	/* "FRNG" */
++#define FRANK_RING_BYTES	2048u
++#define FRANK_RING_MASK		(FRANK_RING_BYTES - 1u)
++
++/* Offsets within the shared block; must match firmware/common/frank_ring.h. */
++#define SH_MAGIC		0x00
++#define SH_VERSION		0x04
++#define SH_CORE1_ALIVE		0x08
++#define SH_DTR			0x0c
++#define SH_TX			0x10
++#define SH_RX			(SH_TX + 8 + FRANK_RING_BYTES)
++#define RING_HEAD		0x00
++#define RING_TAIL		0x04
++#define RING_DATA		0x08
++
++#define FRANK_RING_NR		1
++#define FRANK_RING_POLL_MS	10
++
++struct frank_ring_port {
++	struct uart_port	port;
++	struct timer_list	rx_timer;
++	bool			running;
++};
++
++static struct frank_ring_port frank_ring_port;
++static void __iomem *frank_ring_early_base;
++
++/* ---- raw ring access -------------------------------------------------- */
++
++static inline u32 ring_used(void __iomem *ring)
++{
++	u32 head = readl_relaxed(ring + RING_HEAD);
++	u32 tail = readl_relaxed(ring + RING_TAIL);
++
++	return (head - tail) & FRANK_RING_MASK;
++}
++
++static inline u32 ring_space(void __iomem *ring)
++{
++	/* One byte stays unused so head == tail always means empty. */
++	return FRANK_RING_MASK - ring_used(ring);
++}
++
++static void ring_put(void __iomem *ring, const u8 *src, u32 len)
++{
++	u32 head = readl_relaxed(ring + RING_HEAD);
++	u32 i;
++
++	for (i = 0; i < len; i++)
++		writeb_relaxed(src[i], ring + RING_DATA +
++			       ((head + i) & FRANK_RING_MASK));
++
++	/* Publish only once the bytes are visible to the other core. */
++	dmb(ish);
++	writel_relaxed((head + len) & FRANK_RING_MASK, ring + RING_HEAD);
++}
++
++static u32 ring_get(void __iomem *ring, u8 *dst, u32 len)
++{
++	u32 used = ring_used(ring);
++	u32 tail, i;
++
++	if (len > used)
++		len = used;
++	if (!len)
++		return 0;
++
++	/* Read the data only after observing the head that promises it. */
++	dmb(ish);
++
++	tail = readl_relaxed(ring + RING_TAIL);
++	for (i = 0; i < len; i++)
++		dst[i] = readb_relaxed(ring + RING_DATA +
++				       ((tail + i) & FRANK_RING_MASK));
++
++	dmb(ish);
++	writel_relaxed((tail + len) & FRANK_RING_MASK, ring + RING_TAIL);
++	return len;
++}
++
++/*
++ * Push one byte, waiting for room.
++ *
++ * Bounded, because an unbounded wait here would hang the kernel whenever no
++ * terminal is attached: core 1 stops draining once its USB FIFO fills, the ring
++ * backs up, and a console write would never return. Dropping console output is
++ * bad; wedging the machine because nobody is watching is worse.
++ */
++static void ring_putc_bounded(void __iomem *ring, u8 c)
++{
++	int spin = 100000;
++
++	while (!ring_space(ring) && --spin > 0)
++		cpu_relax();
++
++	if (ring_space(ring))
++		ring_put(ring, &c, 1);
++}
++
++/* ---- uart_port ------------------------------------------------------- */
++
++static void frank_ring_rx_poll(struct timer_list *t)
++{
++	struct frank_ring_port *fp = from_timer(fp, t, rx_timer);
++	void __iomem *rx = fp->port.membase + SH_RX;
++	u8 buf[64];
++	u32 n;
++
++	while ((n = ring_get(rx, buf, sizeof(buf))) > 0) {
++		tty_insert_flip_string(&fp->port.state->port, buf, n);
++		fp->port.icount.rx += n;
++	}
++	tty_flip_buffer_push(&fp->port.state->port);
++
++	if (fp->running)
++		mod_timer(&fp->rx_timer,
++			  jiffies + msecs_to_jiffies(FRANK_RING_POLL_MS));
++}
++
++static unsigned int frank_ring_tx_empty(struct uart_port *port)
++{
++	return ring_used(port->membase + SH_TX) ? 0 : TIOCSER_TEMT;
++}
++
++static void frank_ring_start_tx(struct uart_port *port)
++{
++	void __iomem *tx = port->membase + SH_TX;
++	unsigned char ch;
++
++	/*
++	 * Drain the kfifo straight into the ring. uart_fifo_get() is the
++	 * current interface; uart_circ_empty() and port->state->xmit that older
++	 * serial drivers use were removed, and reaching for them is how this
++	 * first failed to build.
++	 *
++	 * No interrupt is needed on completion: writing to the ring is the
++	 * transmission, and core 1 picks it up on its next pass.
++	 */
++	while (ring_space(tx) && uart_fifo_get(port, &ch))
++		ring_put(tx, &ch, 1);
++}
++
++static void frank_ring_stop_tx(struct uart_port *port) { }
++static void frank_ring_stop_rx(struct uart_port *port)
++{
++	frank_ring_port.running = false;
++}
++
++static int frank_ring_startup(struct uart_port *port)
++{
++	struct frank_ring_port *fp = &frank_ring_port;
++
++	fp->running = true;
++	timer_setup(&fp->rx_timer, frank_ring_rx_poll, 0);
++	mod_timer(&fp->rx_timer, jiffies + msecs_to_jiffies(FRANK_RING_POLL_MS));
++	return 0;
++}
++
++static void frank_ring_shutdown(struct uart_port *port)
++{
++	struct frank_ring_port *fp = &frank_ring_port;
++
++	fp->running = false;
++	timer_delete_sync(&fp->rx_timer);
++}
++
++/*
++ * Baud rate, parity and flow control are all meaningless here: the transport is
++ * a memory ring, and the USB CDC on the other side of core 1 ignores the line
++ * coding the host asks for. Accept whatever is requested so userspace tools
++ * that insist on setting a baud rate work, and change nothing.
++ */
++static void frank_ring_set_termios(struct uart_port *port,
++				   struct ktermios *termios,
++				   const struct ktermios *old)
++{
++	unsigned int baud = uart_get_baud_rate(port, termios, old, 0, 4000000);
++
++	uart_update_timeout(port, termios->c_cflag, baud);
++}
++
++static const char *frank_ring_type(struct uart_port *port)
++{
++	return "FRANK-RING";
++}
++
++static void frank_ring_config_port(struct uart_port *port, int flags)
++{
++	if (flags & UART_CONFIG_TYPE)
++		port->type = PORT_GENERIC;
++}
++
++static unsigned int frank_ring_get_mctrl(struct uart_port *port)
++{
++	/* Report carrier permanently: the ring is always "connected" as far as
++	 * the kernel is concerned, and core 1 handles whether a USB host is
++	 * actually listening. Without this a getty waits forever for DCD. */
++	return TIOCM_CAR | TIOCM_DSR | TIOCM_CTS;
++}
++
++static void frank_ring_set_mctrl(struct uart_port *port, unsigned int mctrl) { }
++static void frank_ring_break_ctl(struct uart_port *port, int ctl) { }
++
++static const struct uart_ops frank_ring_ops = {
++	.tx_empty	= frank_ring_tx_empty,
++	.set_mctrl	= frank_ring_set_mctrl,
++	.get_mctrl	= frank_ring_get_mctrl,
++	.stop_tx	= frank_ring_stop_tx,
++	.start_tx	= frank_ring_start_tx,
++	.stop_rx	= frank_ring_stop_rx,
++	.break_ctl	= frank_ring_break_ctl,
++	.startup	= frank_ring_startup,
++	.shutdown	= frank_ring_shutdown,
++	.set_termios	= frank_ring_set_termios,
++	.type		= frank_ring_type,
++	.config_port	= frank_ring_config_port,
++};
++
++/* ---- console --------------------------------------------------------- */
++
++static void frank_ring_console_putchar(struct uart_port *port, unsigned char ch)
++{
++	if (ch == '\n')
++		ring_putc_bounded(port->membase + SH_TX, '\r');
++	ring_putc_bounded(port->membase + SH_TX, ch);
++}
++
++static void frank_ring_console_write(struct console *co, const char *s,
++				     unsigned int count)
++{
++	uart_console_write(&frank_ring_port.port, s, count,
++			   frank_ring_console_putchar);
++}
++
++static struct uart_driver frank_ring_uart_driver;
++
++static int __init frank_ring_console_setup(struct console *co, char *options)
++{
++	if (!frank_ring_port.port.membase)
++		return -ENODEV;
++	return 0;
++}
++
++static struct console frank_ring_console = {
++	.name	= "ttyFRK",
++	.write	= frank_ring_console_write,
++	.device	= uart_console_device,
++	.setup	= frank_ring_console_setup,
++	.flags	= CON_PRINTBUFFER,
++	.index	= -1,
++	.data	= &frank_ring_uart_driver,
++};
++
++static struct uart_driver frank_ring_uart_driver = {
++	.owner		= THIS_MODULE,
++	.driver_name	= "frank_ring",
++	.dev_name	= "ttyFRK",
++	.nr		= FRANK_RING_NR,
++	.cons		= &frank_ring_console,
++};
++
++/* ---- earlycon -------------------------------------------------------- */
++
++static void frank_ring_early_putchar(struct uart_port *port, unsigned char ch)
++{
++	if (ch == '\n')
++		ring_putc_bounded(port->membase + SH_TX, '\r');
++	ring_putc_bounded(port->membase + SH_TX, ch);
++}
++
++static void frank_ring_early_write(struct console *con, const char *s,
++				   unsigned int n)
++{
++	struct earlycon_device *dev = con->data;
++
++	uart_console_write(&dev->port, s, n, frank_ring_early_putchar);
++}
++
++static int __init frank_ring_early_init(struct earlycon_device *device,
++					const char *opt)
++{
++	if (!device->port.membase)
++		return -ENODEV;
++
++	frank_ring_early_base = device->port.membase;
++	device->con->write = frank_ring_early_write;
++	return 0;
++}
++
++EARLYCON_DECLARE(frank_ring, frank_ring_early_init);
++OF_EARLYCON_DECLARE(frank_ring, "frank,ring-console", frank_ring_early_init);
++
++/* ---- platform driver ------------------------------------------------- */
++
++static int frank_ring_probe(struct platform_device *pdev)
++{
++	struct frank_ring_port *fp = &frank_ring_port;
++	struct resource *res;
++	void __iomem *base;
++	u32 magic;
++
++	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
++	if (!res)
++		return -ENODEV;
++
++	base = devm_ioremap(&pdev->dev, res->start, resource_size(res));
++	if (!base)
++		return -ENOMEM;
++
++	/*
++	 * Refuse to run if core 1 has not published the block. Without this the
++	 * driver would happily drive whatever indices happen to be in SRAM after
++	 * a warm reset and scribble through the ring.
++	 */
++	magic = readl_relaxed(base + SH_MAGIC);
++	if (magic != FRANK_RING_MAGIC) {
++		dev_err(&pdev->dev,
++			"no ring at %pa (magic 0x%08x, expected 0x%08x) -- is core 1 running?\n",
++			&res->start, magic, FRANK_RING_MAGIC);
++		return -ENODEV;
++	}
++
++	dev_info(&pdev->dev, "core-1 ring console, core1_alive=%u\n",
++		 readl_relaxed(base + SH_CORE1_ALIVE));
++
++	fp->port.dev		= &pdev->dev;
++	fp->port.membase	= base;
++	fp->port.mapbase	= res->start;
++	fp->port.iotype		= UPIO_MEM;
++	fp->port.ops		= &frank_ring_ops;
++	fp->port.flags		= UPF_BOOT_AUTOCONF;
++	fp->port.type		= PORT_GENERIC;
++	fp->port.fifosize	= FRANK_RING_BYTES;
++	fp->port.line		= 0;
++	/* No interrupt: RX is polled, TX never blocks the CPU. */
++	fp->port.irq		= 0;
++	fp->port.uartclk	= 115200 * 16;
++
++	return uart_add_one_port(&frank_ring_uart_driver, &fp->port);
++}
++
++static void frank_ring_remove(struct platform_device *pdev)
++{
++	uart_remove_one_port(&frank_ring_uart_driver, &frank_ring_port.port);
++}
++
++static const struct of_device_id frank_ring_of_match[] = {
++	{ .compatible = "frank,ring-console" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, frank_ring_of_match);
++
++static struct platform_driver frank_ring_platform_driver = {
++	.probe	= frank_ring_probe,
++	.remove	= frank_ring_remove,
++	.driver	= {
++		.name		= "frank-ring",
++		.of_match_table	= frank_ring_of_match,
++	},
++};
++
++static int __init frank_ring_init(void)
++{
++	int ret;
++
++	ret = uart_register_driver(&frank_ring_uart_driver);
++	if (ret)
++		return ret;
++
++	ret = platform_driver_register(&frank_ring_platform_driver);
++	if (ret)
++		uart_unregister_driver(&frank_ring_uart_driver);
++
++	return ret;
++}
++
++static void __exit frank_ring_exit(void)
++{
++	platform_driver_unregister(&frank_ring_platform_driver);
++	uart_unregister_driver(&frank_ring_uart_driver);
++}
++
++module_init(frank_ring_init);
++module_exit(frank_ring_exit);
++
++MODULE_DESCRIPTION("Console over the RP2350 core-1 SRAM ring");
++MODULE_LICENSE("GPL");

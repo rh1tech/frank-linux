@@ -1,0 +1,120 @@
+ARM: add rp2350_defconfig for the FRANK Core 2 Proto slave half
+
+Derived from mps2_defconfig, which is the closest existing v7-M NOMMU target,
+with four substantive changes:
+
+  DRAM_BASE/SIZE   0x11000000 / 8 MB -- the QMI chip-select 1 window, which is
+                   where the external PSRAM appears. The internal SRAM is
+                   deliberately not system RAM: it belongs to core 1.
+
+  BINFMT_ELF_FDPIC replaces BINFMT_FLAT. bFLT needs one contiguous allocation
+                   per process covering text and data together, and 8 MB cannot
+                   supply it once the kernel and initramfs are resident -- a
+                   bFLT userspace on this board reached a shell that could not
+                   start a single external command.
+
+  FRANK_RING_CONSOLE replaces the MPS2 UART. This half has no wired UART and the
+                   RP2350's USB controller has no Linux driver, so core 1 serves
+                   the console through an SRAM ring.
+
+  ARM_MPU is on. The M33 reports PMSAv8, unified, with 8 regions.
+
+Networking is dropped wholesale: there is no interface on this half and the
+stack is pure overhead in 8 MB.
+
+--- /dev/null
++++ b/arch/arm/configs/rp2350_defconfig
+@@ -0,0 +1,93 @@
++CONFIG_NO_HZ_IDLE=y
++CONFIG_HIGH_RES_TIMERS=y
++CONFIG_PREEMPT_VOLUNTARY=y
++CONFIG_LOG_BUF_SHIFT=16
++CONFIG_CC_OPTIMIZE_FOR_SIZE=y
++CONFIG_EXPERT=y
++# CONFIG_UID16 is not set
++CONFIG_BASE_SMALL=y
++# CONFIG_FUTEX is not set
++# CONFIG_EPOLL is not set
++# CONFIG_SIGNALFD is not set
++# CONFIG_EVENTFD is not set
++# CONFIG_AIO is not set
++# CONFIG_MMU is not set
++CONFIG_ARCH_RP2350=y
++CONFIG_SET_MEM_PARAM=y
++CONFIG_DRAM_BASE=0x11000000
++CONFIG_DRAM_SIZE=0x800000
++# CONFIG_ATAGS is not set
++# CONFIG_SUSPEND is not set
++# CONFIG_BLOCK is not set
++CONFIG_BINFMT_ELF_FDPIC=y
++# CONFIG_COREDUMP is not set
++# CONFIG_VM_EVENT_COUNTERS is not set
++CONFIG_DEVTMPFS=y
++CONFIG_DEVTMPFS_MOUNT=y
++# CONFIG_FW_LOADER is not set
++# CONFIG_INPUT is not set
++# CONFIG_SERIO is not set
++# CONFIG_VT is not set
++# CONFIG_LEGACY_PTYS is not set
++# CONFIG_HW_RANDOM is not set
++# CONFIG_HWMON is not set
++CONFIG_WATCHDOG=y
++CONFIG_ARM_SP805_WATCHDOG=y
++CONFIG_MFD_SYSCON=y
++# CONFIG_USB_SUPPORT is not set
++CONFIG_NEW_LEDS=y
++CONFIG_LEDS_CLASS=y
++CONFIG_LEDS_SYSCON=y
++CONFIG_LEDS_TRIGGERS=y
++CONFIG_LEDS_TRIGGER_TIMER=y
++CONFIG_LEDS_TRIGGER_ONESHOT=y
++CONFIG_LEDS_TRIGGER_HEARTBEAT=y
++CONFIG_LEDS_TRIGGER_BACKLIGHT=y
++CONFIG_LEDS_TRIGGER_CPU=y
++CONFIG_LEDS_TRIGGER_DEFAULT_ON=y
++CONFIG_ARM_TIMER_SP804=y
++# CONFIG_DNOTIFY is not set
++# CONFIG_INOTIFY_USER is not set
++# CONFIG_MISC_FILESYSTEMS is not set
++CONFIG_NFS_FS=y
++CONFIG_NFS_V4=y
++CONFIG_NFS_V4_1=y
++CONFIG_NFS_V4_2=y
++CONFIG_ROOT_NFS=y
++CONFIG_NLS=y
++CONFIG_PRINTK_TIME=y
++# CONFIG_ENABLE_MUST_CHECK is not set
++# CONFIG_DEBUG_BUGVERBOSE is not set
++CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT=y
++CONFIG_DEBUG_FS=y
++# CONFIG_SLUB_DEBUG is not set
++# CONFIG_SCHED_DEBUG is not set
++CONFIG_MEMTEST=y
++
++#
++# FRANK Core 2 Proto, slave half.
++#
++# Networking is dropped wholesale: there is no interface on this half, and in
++# 8 MB of RAM the stack is pure overhead.
++#
++
++# Uniprocessor is load-bearing, not a simplification. ARM_NO_EXCLUSIVES replaces
++# LDREX/STREX with interrupt masking, which is atomic only against this core.
++# CONFIG_SMP is not set
++
++# Console served by core 1 through an SRAM ring; there is no usable UART on this
++# half and the RP2350's USB controller has no Linux driver.
++CONFIG_FRANK_RING_CONSOLE=y
++CONFIG_SERIAL_CORE=y
++CONFIG_SERIAL_CORE_CONSOLE=y
++CONFIG_SERIAL_EARLYCON=y
++
++# TIMER0 as clocksource and clockevent; ARMV7M_SYSTICK gives only the former.
++CONFIG_CLKSRC_RP2350=y
++
++# The MPU is real here -- PMSAv8, unified, 8 regions (hw-findings F6) -- unlike
++# the Cortex-M3 QEMU target where PMSAv7 could not describe the memory map.
++CONFIG_ARM_MPU=y
++
++CONFIG_OF=y
++CONFIG_USE_OF=y

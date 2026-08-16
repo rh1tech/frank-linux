@@ -1,0 +1,74 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Raspberry Pi RP2350, Arm side.
+ *
+ * Copyright (c) 2026 Mikhail Matveev <xtreme@rh1.tech>
+ *
+ * Addresses confirmed on hardware rather than transcribed; see
+ * docs/hw-findings.md.
+ */
+
+/ {
+	#address-cells = <1>;
+	#size-cells = <1>;
+	compatible = "raspberrypi,rp2350";
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		cpu@0 {
+			device_type = "cpu";
+			compatible = "arm,cortex-m33";
+			reg = <0>;
+		};
+	};
+
+	/*
+	 * The NVIC. Mainline drives this directly, which is one of the reasons
+	 * the Arm side was worth taking: the RISC-V port had to invent an
+	 * interrupt controller and patch it in.
+	 */
+	nvic: interrupt-controller@e000e100 {
+		compatible = "arm,armv7m-nvic";
+		interrupt-controller;
+		#interrupt-cells = <1>;
+		reg = <0xe000e100 0xc00>;
+		arm,num-irq-priority-bits = <4>;
+	};
+
+	soc {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		compatible = "simple-bus";
+		ranges;
+
+		/*
+		 * TIMER0: 64-bit, 1 MHz, four alarms. Alarm 0 is the kernel
+		 * tick; the other three are left for core 1. ARMV7M_SYSTICK
+		 * would only give a clocksource, and the kernel needs a
+		 * clockevent too.
+		 */
+		timer0: timer@400b0000 {
+			compatible = "raspberrypi,rp2350-timer";
+			reg = <0x400b0000 0x100>;
+			interrupts = <0>;
+			interrupt-parent = <&nvic>;
+			clock-frequency = <1000000>;
+		};
+
+		/*
+		 * The console. Not a UART: core 1 runs a TinyUSB CDC device and
+		 * moves bytes through two rings in SRAM, because the RP2350's
+		 * USB controller has no Linux driver.
+		 *
+		 * 0x2007e000 is the top of *main* SRAM. Deliberately not
+		 * 0x20080000, which looks like the top of SRAM and is actually
+		 * SCRATCH_X -- core 1's stack (hw-findings F13).
+		 */
+		console: ring-console@2007e000 {
+			compatible = "frank,ring-console";
+			reg = <0x2007e000 0x1020>;
+		};
+	};
+};

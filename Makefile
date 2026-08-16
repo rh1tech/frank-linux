@@ -57,7 +57,8 @@ DOCKER_SHELL = docker run --rm -it \
 	-w /src $(IMAGE)
 
 .PHONY: help hooks image volumes shell check check-fast smoke-riscv qemu-arm-config \
-        smoke-riscv-config smoke-riscv-flash qemu-arm qemu-arm-run reffw \
+        smoke-riscv-config smoke-riscv-flash qemu-arm qemu-arm-run \
+        slave slave-config slave-flash reffw \
         clean-smoke distclean
 
 help:
@@ -75,6 +76,8 @@ help:
 	@echo "  make smoke-riscv     Phase 1: RISC-V Linux for the master half"
 	@echo "  make qemu-arm        Phase 3: ARM NOMMU + FDPIC kernel for QEMU"
 	@echo "  make qemu-arm-run    boot it under qemu-system-arm"
+	@echo "  make slave           Phase 4: ARM Linux for the FRANK slave half"
+	@echo "  make slave-flash     flash bootloader + kernel + DTB and boot it"
 	@echo "  make smoke-riscv-flash   flash it and wait for a shell prompt"
 
 # Attribution protection. The commit-msg hook refuses a message crediting an AI;
@@ -181,6 +184,24 @@ qemu-arm: volumes
 
 qemu-arm-run:
 	@./tools/qemu-arm.sh
+
+# --------------------------------------- Phase 4: ARM on the slave half ----
+
+BRSLAVE = make -C /br O=/out/core2-slave BR2_EXTERNAL=/src/br-external
+
+slave-config: volumes
+	$(DOCKER_RUN) sh -c '$(BRSLAVE) frank_core2_slave_defconfig'
+
+slave: volumes
+	$(DOCKER_RUN) sh -c '\
+		test -f /out/core2-slave/.config || $(BRSLAVE) frank_core2_slave_defconfig; \
+		$(BRSLAVE) -j$(JOBS) && \
+		mkdir -p /src/build/core2-slave && \
+		cp /out/core2-slave/images/* /src/build/core2-slave/'
+	@ls -l build/core2-slave/
+
+slave-flash:
+	@./tools/flash-slave.sh
 
 clean-smoke:
 	docker volume rm $(OUT_VOL) 2>/dev/null || true
