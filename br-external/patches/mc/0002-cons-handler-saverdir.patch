@@ -1,0 +1,66 @@
+cons.handler: do not use SAVERDIR when the build did not define it
+
+Building for a uClinux target stops here:
+
+  cons.handler.c:221:55: error: 'SAVERDIR' undeclared (first use in this function)
+
+configure decides whether to build the console saver by matching the host
+triplet against linux*:
+
+  cons_saver=""
+  case $host_os in
+  linux*)
+      cons_saver=yes
+  esac
+
+and src/Makefile.am defines SAVERDIR only `if CONS_SAVER`. On a uClinux
+toolchain the triplet is arm-buildroot-uclinuxfdpiceabi, so $host_os is
+"uclinuxfdpiceabi" and does not match -- while cons.handler.c decides the same
+question with #ifdef __linux__, which the compiler does define, because this is
+Linux. Two notions of "is this Linux" that agree on every ordinary target and
+disagree here.
+
+Rather than argue with either, make the reference conditional on the macro that
+actually says whether the saver exists. Without it the code falls through to the
+path already there for "console is not a tty or execl() failed", which sets
+console_flag to 0 and carries on -- the same thing that happens on any machine
+whose console is not a Linux virtual terminal, which includes this one.
+
+Upstream status: not submitted, though the mismatch is upstream's and would be
+worth reporting.
+
+--- a/src/cons.handler.c
++++ b/src/cons.handler.c
+@@ -185,12 +185,16 @@
+         else
+         {
+             /* Child */
++#ifdef SAVERDIR
+             char *tty_name;
++#endif
+ 
+             /* Close the extra pipe ends */
+             status = close (pipefd1[1]);
+             status = close (pipefd2[0]);
++#ifdef SAVERDIR
+             tty_name = ttyname (0);
++#endif
+             /* Bind the pipe 0 to the standard input */
+             do
+             {
+@@ -213,6 +217,7 @@
+                 if (!ok)
+                     break;
+ 
++#ifdef SAVERDIR
+                 if (tty_name != NULL)
+                 {
+                     char *mc_conssaver;
+@@ -221,6 +226,7 @@
+                     mc_conssaver = mc_build_filename (SAVERDIR, "cons.saver", (char *) NULL);
+                     execl (mc_conssaver, "cons.saver", tty_name, (char *) NULL);
+                 }
++#endif /* SAVERDIR */
+                 /* Console is not a tty or execl() failed */
+             }
+             while (0);

@@ -17,6 +17,10 @@ One behaviour improves. A failed exec used to reach the parent as exit status
 127 and nothing else, because the only thing left to report it was a child that
 had already been created. posix_spawnp() returns the errno directly.
 
+my_fork_state() and its FORK_ERROR/FORK_CHILD/FORK_PARENT enum go with it:
+they existed only to describe the shape of that fork, and leaving them behind
+is a -Wunused-function warning and a reader wondering which path is live.
+
 my_fork() itself stays, and fails with ENOSYS. The remaining callers are the
 subshell and background file operations, both of which need a genuine copy of a
 running mc and are configured out (--without-subshell, --disable-background).
@@ -28,21 +32,70 @@ several changes such a port would need.
 
 --- a/lib/utilunix.c
 +++ b/lib/utilunix.c
-@@ -54,6 +54,13 @@
+@@ -54,6 +54,12 @@
  #include <sys/select.h>
  #endif
  #include <sys/wait.h>
 +#include <spawn.h>
++/* For environ, which POSIX puts here. uClibc guards the declaration with
++   __USE_GNU, and mc's config.h defines _GNU_SOURCE before anything else is
++   included, so it is visible -- declaring it again here is a -Wredundant-decls
++   warning rather than insurance. */
 +#include <unistd.h>
-+
-+/* POSIX says an application declares this itself. uClibc hides it behind
-+   __USE_GNU, and mc compiles with -std=c99, so relying on the header pulling it
-+   in is one configure option away from an implicit declaration. */
-+extern char **environ;
  #include <pwd.h>
  #include <grp.h>
  
-@@ -378,7 +385,21 @@
+@@ -87,13 +93,6 @@
+     char *string;
+ } int_cache;
+ 
+-typedef enum
+-{
+-    FORK_ERROR = -1,
+-    FORK_CHILD,
+-    FORK_PARENT,
+-} my_fork_state_t;
+-
+ typedef struct
+ {
+     struct sigaction intr;
+@@ -134,35 +133,6 @@
+     *last = ((*last) + 1) % size;
+ }
+ 
+-/* --------------------------------------------------------------------------------------------- */
+-
+-static my_fork_state_t
+-my_fork_state (void)
+-{
+-    pid_t pid;
+-
+-    pid = my_fork ();
+-
+-    if (pid < 0)
+-    {
+-        fprintf (stderr, "\n\nfork () = -1\n");
+-        return FORK_ERROR;
+-    }
+-
+-    if (pid == 0)
+-        return FORK_CHILD;
+-
+-    while (TRUE)
+-    {
+-        int status = 0;
+-
+-        if (waitpid (pid, &status, 0) > 0)
+-            return WEXITSTATUS (status) == 0 ? FORK_PARENT : FORK_ERROR;
+-
+-        if (errno != EINTR)
+-            return FORK_ERROR;
+-    }
+-}
+ 
+ /* --------------------------------------------------------------------------------------------- */
+ 
+@@ -378,7 +348,21 @@
  pid_t
  my_fork (void)
  {
@@ -65,7 +118,7 @@ several changes such a port would need.
  }
  
  /* --------------------------------------------------------------------------------------------- */
-@@ -471,34 +492,71 @@
+@@ -471,34 +455,71 @@
  int
  my_systemv (const char *command, char *const argv[])
  {
@@ -115,12 +168,12 @@ several changes such a port would need.
 +    {
 +        (void) posix_spawnattr_setsigdefault (&attr, &defaults);
 +        (void) posix_spawnattr_setflags (&attr, POSIX_SPAWN_SETSIGDEF);
-+
-+        err = posix_spawnp (&pid, command, NULL, &attr, argv, environ);
-+        posix_spawnattr_destroy (&attr);
  
 -            my_execvp (command, argv);
 -            my_exit (127);      /* Exec error */
++        err = posix_spawnp (&pid, command, NULL, &attr, argv, environ);
++        posix_spawnattr_destroy (&attr);
++
 +        if (err != 0)
 +        {
 +            /* The old code could not report this: the exec failed in a child
