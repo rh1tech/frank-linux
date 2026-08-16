@@ -128,6 +128,16 @@ volumes: image
 	@$(DOCKER_RUN) sh -c 'cd /ext && git checkout -q -- . && \
 		for p in /src/smoke-riscv/*.patch; do git apply -p1 "$$p"; done && \
 		echo "applied $$(ls /src/smoke-riscv/*.patch | wc -l | tr -d " ") patch(es) to the external tree"'
+	@# Buildroot's own tree, same idiom as /ext above.
+	@#
+	@# BR2_EXTERNAL can add packages but cannot change the ones Buildroot ships,
+	@# and several of those carry `depends on BR2_USE_MMU` as a blanket stand-in
+	@# for "uses fork()". Where the fork call sites have actually been dealt
+	@# with, that dependency is no longer true and has to come off. Reset first
+	@# so this is idempotent across runs.
+	@$(DOCKER_RUN) sh -c 'cd /br && git checkout -q -- . && \
+		for p in /src/buildroot-patches/*.patch; do git apply -p1 "$$p"; done && \
+		echo "applied $$(ls /src/buildroot-patches/*.patch | wc -l | tr -d " ") patch(es) to buildroot"'
 
 shell: image
 	$(DOCKER_SHELL) bash
@@ -245,3 +255,24 @@ kernel-grep: volumes
 
 kernel-ls: volumes
 	@$(DOCKER_RUN) sh -c 'ls -la /out/core2-slave/build/linux-6.*/$(D)'
+
+# Full rebuild of the slave output, toolchain included.
+#
+# Needed when a toolchain option changes -- BR2_TOOLCHAIN_BUILDROOT_WCHAR or the
+# thread implementation, for instance. Buildroot will not rebuild uClibc and gcc
+# on its own for those, and carrying on with a stale toolchain produces link
+# errors that look like package bugs.
+# Re-extract and rebuild one package, so a new patch in br-external/patches/
+# actually gets applied. Buildroot patches at extract time and stamps it, so
+# adding a patch to an already-extracted package does nothing at all -- the
+# build succeeds or fails exactly as before, which is a confusing way to spend
+# twenty minutes.
+#   make slave-pkg PKG=ncurses
+slave-pkg: volumes
+	$(DOCKER_RUN) sh -c '$(BRSLAVE) $(PKG)-dirclean && $(BRSLAVE) -j$(JOBS) && \
+		mkdir -p /src/build/core2-slave && \
+		cp /out/core2-slave/images/* /src/build/core2-slave/'
+	@ls -l build/core2-slave/
+
+slave-distclean: volumes
+	$(DOCKER_RUN) sh -c 'rm -rf /out/core2-slave'

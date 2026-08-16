@@ -819,6 +819,71 @@ stall it, while block requests can still wait seconds for a busy card.
 
 Every one of these presented as silence somewhere unrelated to its cause.
 
+## F23. A usable userspace, stage 0: the terminal holds up
+
+```
+VI_LINE_ALPHA
+VI_LINE_BETA
+~
+... 22 tilde lines ...
+- /tmp/t 1/2 50%
+```
+
+Decoded off the capture card at confidence 1.000. Two content lines, twenty-two
+tildes and a status row is exactly 25, which is the check that matters: the
+console is a ring in SRAM with no driver that knows anything about geometry, so
+`TIOCGWINSZ` returns 0x0 and every full-screen program falls back to 80x24 --
+one row short, status line in the wrong place. `stty rows 25 cols 80` from
+`/etc/profile.d` fixes it once for vi, nano and mc alike.
+
+The VersaTerm engine needed nothing. Audited against what vt102 terminfo asks
+for, it already handles cursor addressing, erase, insert/delete line and
+character, scroll regions, SGR, save/restore, and `ESC[6n` -- the cursor
+position report, which is how a program discovers the screen size when the tty
+will not tell it. `v/vt102` is in Buildroot's default terminfo set, so `TERM`
+needed nothing either.
+
+### The console link was sized for scrolling text
+
+`LINK_CON_MAX_TX` was 64 bytes, which is ample for a shell emitting a line at a
+time and hopeless for a program that repaints the screen. A full 80x25 repaint
+with attributes is several kB, and every transaction costs a round trip: 141 us
+idle, 2753 us with the master's USB HID host running (F3). At 64 bytes that is
+64 round trips, a sixth of a second per repaint with a keyboard plugged in, and
+an editor that feels broken. Now 512, so eight.
+
+### What it cost
+
+| | before | after |
+|---|---|---|
+| MemFree | 2708 kB | 1972 kB |
+| MemAvailable | 2388 kB | 1692 kB |
+| rootfs.cpio | 912 kB | 1314 kB |
+| applets | 162 | 176 |
+
+The stock NOMMU BusyBox config ships 162 applets and no editor at all -- no vi,
+no less, no awk, no find, no tar. That is not a size decision, it is just what
+the default happens to contain.
+
+1692 kB of headroom is enough for nano and nowhere near enough for mc plus
+glib2, which is what puts /usr/local on the card in the next stage.
+
+### ncurses does not think this machine can link a shared library
+
+```
+checking which arm-buildroot-uclinuxfdpiceabi-gcc option to use... -fPIC
+configure: error: Shared libraries are not supported in this version
+```
+
+Both lines are from the same configure run. It probes the compiler, gets -fPIC,
+and then decides from a case on the host triple -- where `uclinuxfdpiceabi`
+matches neither `linux*` nor `gnu*` and falls into `(*)`, which sets
+`CC_SHARED_OPTS=unknown`. Other cases in the same file already list `uclinux*`
+beside the linux variants, so it is an omission rather than a policy.
+
+Shared libraries are not optional here: one `libc.so` shared across processes is
+what lets an 8 MB NOMMU system run more than one program (F8, F11).
+
 ## F22. CONFIG_ARM_MPU: it works, and mainline cannot survive it
 
 ```

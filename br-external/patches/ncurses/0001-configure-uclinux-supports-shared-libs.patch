@@ -1,0 +1,42 @@
+Recognise uclinux* as a host that can build shared libraries
+
+ncurses' configure decides whether shared libraries are possible from a case on
+the host triple. Our toolchain is arm-buildroot-uclinuxfdpiceabi, so $host_os is
+"uclinuxfdpiceabi", which matches neither `linux*` nor `gnu*` and falls through
+to the (*) branch:
+
+	(*)
+		CC_SHARED_OPTS='unknown'
+		MK_SHARED_LIB='echo unknown'
+
+after which configure stops with "Shared libraries are not supported in this
+version" -- on a toolchain it had probed three lines earlier and which answered
+-fPIC. uClibc FDPIC builds shared libraries perfectly well; the whole userspace
+depends on a shared libc.so, and on an 8 MB NOMMU system that sharing is what
+makes running more than one program possible at all.
+
+Other parts of this same configure already list uclinux* alongside the linux
+variants, so these two cases are an omission rather than a policy.
+
+Signed-off-by: Mikhail Matveev <xtreme@rh1.tech>
+
+--- a/configure
++++ b/configure
+@@ -6792,7 +6792,7 @@
+ 			LD_RPATH_OPT="-rpath "
+ 		fi
+ 		;;
+-	(linux*|gnu*|k*bsd*-gnu|freebsd*)
++	(linux*|uclinux*|gnu*|k*bsd*-gnu|freebsd*)
+ 		LD_RPATH_OPT="-Wl,-rpath,"
+ 		;;
+ 	(openbsd[2-9].*|mirbsd*)
+@@ -7151,7 +7151,7 @@
+ 		fi
+ 		cf_cv_rm_so_locs=yes
+ 		;;
+-	(linux*|gnu*|k*bsd*-gnu)
++	(linux*|uclinux*|gnu*|k*bsd*-gnu)
+ 		if test "$DFT_LWR_MODEL" = "shared" && test -n "$LD_RPATH_OPT" ; then
+ 			LOCAL_LDFLAGS="${LD_RPATH_OPT}\$(LOCAL_LIBDIR)"
+ 			LOCAL_LDFLAGS2="$LOCAL_LDFLAGS"

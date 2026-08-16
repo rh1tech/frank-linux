@@ -25,7 +25,7 @@ stack is pure overhead in 8 MB.
 
 --- /dev/null
 +++ b/arch/arm/configs/rp2350_defconfig
-@@ -0,0 +1,112 @@
+@@ -0,0 +1,120 @@
 +CONFIG_NO_HZ_IDLE=y
 +CONFIG_HIGH_RES_TIMERS=y
 +CONFIG_PREEMPT_VOLUNTARY=y
@@ -51,6 +51,14 @@ stack is pure overhead in 8 MB.
 +# defconfig turns BLOCK off because that board has no storage at all.
 +CONFIG_BLOCK=y
 +CONFIG_FRANK_LINK_BLOCK=y
++# Loop device, so a filesystem image can be a file on the card.
++#
++# The card carries one FAT partition with the owner's data on it. Repartitioning
++# to add somewhere with unix permissions and symlinks would put that at risk for
++# no good reason; an ext4 image inside a single new file does the same job and
++# leaves the partition table alone.
++CONFIG_BLK_DEV_LOOP=y
++CONFIG_BLK_DEV_LOOP_MIN_COUNT=2
 +CONFIG_EXT4_FS=y
 +CONFIG_VFAT_FS=y
 +CONFIG_NLS_CODEPAGE_437=y

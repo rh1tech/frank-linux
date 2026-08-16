@@ -60,7 +60,22 @@ enum {
  * master always sends the full key buffer and puts the valid count in the reply
  * header. Everything on this wire is a size the other end can predict.
  */
-#define LINK_CON_MAX_TX   64u      /* console bytes per transaction */
+/*
+ * Console bytes per transaction.
+ *
+ * 512 rather than 64, because full-screen programs change the arithmetic. A
+ * scrolling shell emits a line at a time and 64 bytes was ample; vi, nano and
+ * mc repaint the whole screen, which with attributes is several kB in one go.
+ *
+ * Every transaction costs a round trip -- 141 us idle, 2753 us with the
+ * master's USB HID host running (F3) -- so at 64 bytes a 4 kB repaint is 64
+ * transactions, a sixth of a second with a keyboard plugged in, and the editor
+ * feels broken. At 512 it is eight, which is not noticeable.
+ *
+ * The ceiling is the master's receive buffer, which is sized for a full block
+ * request at LINK_BLK_MAX_SECTORS * 512 = 4096 bytes.
+ */
+#define LINK_CON_MAX_TX   512u
 #define LINK_CON_MAX_KEYS 32u      /* keystroke bytes, always sent in full */
 
 typedef struct __attribute__((packed)) {

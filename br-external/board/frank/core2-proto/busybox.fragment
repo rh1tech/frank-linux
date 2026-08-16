@@ -1,0 +1,70 @@
+# BusyBox applets this board needs and Buildroot's NOMMU default leaves out.
+#
+# The stock config gives 162 applets and no editor at all -- no vi, no less, no
+# awk, no find, no tar. That is not a size decision, it is just what the default
+# happens to contain; each of these costs a few kB in a binary that is already
+# resident.
+#
+# Nothing here needs fork(): BusyBox applets run inside the shell's own process
+# or via its NOMMU-aware vfork/re-exec path, which is why this works at all
+# where bash does not.
+
+# The editor. Until nano lands this is the only way to change a file on the
+# target, and it is the first thing to exercise the terminal's cursor
+# addressing -- which is why the Stage 0 gate is `vi` and not something quieter.
+CONFIG_VI=y
+CONFIG_FEATURE_VI_MAX_LEN=4096
+CONFIG_FEATURE_VI_COLON=y
+CONFIG_FEATURE_VI_YANKMARK=y
+CONFIG_FEATURE_VI_SEARCH=y
+CONFIG_FEATURE_VI_USE_SIGNALS=y
+CONFIG_FEATURE_VI_DOT_CMD=y
+CONFIG_FEATURE_VI_READONLY=y
+CONFIG_FEATURE_VI_SETOPTS=y
+CONFIG_FEATURE_VI_UNDO=y
+CONFIG_FEATURE_VI_WIN_RESIZE=y
+CONFIG_FEATURE_VI_ASK_TERMINAL=y
+
+# Paging and text processing.
+CONFIG_LESS=y
+CONFIG_FEATURE_LESS_MAXLINES=9999999
+CONFIG_FEATURE_LESS_BRACKETS=y
+CONFIG_FEATURE_LESS_FLAGS=y
+CONFIG_FEATURE_LESS_TRUNCATE=y
+CONFIG_FEATURE_LESS_DASHCMD=y
+CONFIG_FEATURE_LESS_LINENUMS=y
+CONFIG_AWK=y
+CONFIG_FEATURE_AWK_LIBM=y
+CONFIG_DIFF=y
+CONFIG_PATCH=y
+
+# Finding and moving things around.
+CONFIG_FIND=y
+CONFIG_FEATURE_FIND_PRINT0=y
+CONFIG_FEATURE_FIND_MTIME=y
+CONFIG_FEATURE_FIND_PERM=y
+CONFIG_FEATURE_FIND_TYPE=y
+CONFIG_FEATURE_FIND_EXEC=y
+CONFIG_FEATURE_FIND_NOT=y
+CONFIG_FEATURE_FIND_DEPTH=y
+CONFIG_TAR=y
+CONFIG_FEATURE_TAR_CREATE=y
+CONFIG_FEATURE_TAR_GNU_EXTENSIONS=y
+CONFIG_GZIP=y
+CONFIG_GUNZIP=y
+
+# Seeing what the machine is doing. `free` and `top` matter more here than on a
+# normal system: on NOMMU the thing that kills a program is fragmentation, and
+# it arrives as a program that will not start rather than as a crash.
+CONFIG_FREE=y
+CONFIG_TOP=y
+CONFIG_FEATURE_TOP_INTERACTIVE=y
+CONFIG_FEATURE_TOP_CPU_USAGE_PERCENTAGE=y
+CONFIG_FEATURE_TOP_DECIMALS=y
+CONFIG_FUSER=y
+CONFIG_LSOF=y
+
+# Mounting the loop image that will hold /usr/local.
+CONFIG_LOSETUP=y
+CONFIG_FEATURE_MOUNT_LOOP=y
+CONFIG_FEATURE_MOUNT_LOOP_CREATE=y

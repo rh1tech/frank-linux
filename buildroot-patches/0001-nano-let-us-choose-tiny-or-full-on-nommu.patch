@@ -1,0 +1,15 @@
+--- a/package/nano/Config.in
++++ b/package/nano/Config.in
+@@ -1,8 +1,10 @@
+ config BR2_PACKAGE_NANO
+ 	bool "nano"
+ 	depends on BR2_USE_WCHAR
+-	# full version uses fork()
+-	select BR2_PACKAGE_NANO_TINY if !BR2_USE_MMU
++	# The full version uses fork(), which NOMMU does not have -- so upstream
++	# forces --enable-tiny there, losing undo, colour syntax, line numbers and
++	# nanorc to avoid a handful of call sites. We patch those call sites
++	# instead (see br-external/patches/nano/), so the choice is ours to make.
+ 	select BR2_PACKAGE_NCURSES
+ 	help
+ 	  A nice ncurses-based editor. Started out as a clone of pico.

@@ -72,7 +72,9 @@ void frank_ring_init(void)
  * FIFO no one was attached to, and the screen stayed blank. Holding it in the
  * ring means it is still there when a console finally appears.
  */
-#define FAN_SIZE 1024u
+/* Large enough to hold a full-screen repaint without chopping it into
+ * link transactions smaller than LINK_CON_MAX_TX. Power of two: FAN_MASK. */
+#define FAN_SIZE 4096u
 #define FAN_MASK (FAN_SIZE - 1u)
 
 static uint8_t fan[FAN_SIZE];

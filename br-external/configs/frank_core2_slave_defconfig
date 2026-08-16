@@ -58,3 +58,21 @@ BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_FRANK_LINUX_PATH)/patches"
 # Userspace: BusyBox in an initramfs the kernel carries itself.
 BR2_TARGET_ROOTFS_INITRAMFS=y
 # BR2_TARGET_ROOTFS_TAR is not set
+
+# Wide characters, which is a toolchain rebuild rather than a package option.
+#
+# Needed by ncurses' wide build and, downstream, by nano and mc -- Buildroot
+# guards both with `depends on BR2_USE_WCHAR`. uClibc has it off by default.
+BR2_TOOLCHAIN_BUILDROOT_WCHAR=y
+
+# ncurses, for anything that draws a screen rather than a line.
+BR2_PACKAGE_NCURSES=y
+BR2_PACKAGE_NCURSES_WCHAR=y
+
+# BusyBox applets the NOMMU default leaves out -- vi, less, awk, find, tar and
+# the memory tools. See the fragment for why each one is here.
+BR2_PACKAGE_BUSYBOX_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_FRANK_LINUX_PATH)/board/frank/core2-proto/busybox.fragment"
+
+# TERM, PATH and the prompt. profile.d rather than replacing /etc/profile, so
+# Buildroot's skeleton keeps working.
+BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_FRANK_LINUX_PATH)/board/frank/core2-proto/rootfs-overlay"
