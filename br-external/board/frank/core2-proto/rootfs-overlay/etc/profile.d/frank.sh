@@ -2,10 +2,27 @@
 #
 # TERM matters more than usual: the console is the master RP2350 running a
 # VersaTerm-derived engine, and full-screen programs pick their escape sequences
-# from terminfo by this name. vt102 is what that engine actually implements --
-# claiming vt100 loses insert/delete-line, and claiming xterm promises colour
-# handling and mouse reporting that is not there.
-export TERM=vt102
+# from terminfo by this name.
+#
+# This said vt102 for a long time, on the reasoning that claiming xterm would
+# promise colour the engine did not have. That was wrong -- the engine has a
+# 256-colour palette and handles SGR 30-37, 40-47 and 38;5;n -- and the cost was
+# that Midnight Commander came up black and white, because vt102 is a
+# monochrome terminal and its terminfo declares no colours at all. ncurses
+# believed it and told mc so.
+#
+# screen is the entry that matches what the firmware actually does:
+#
+#            colours  kf1     kf3     line drawing
+#   vt102    none     \EOP    \EOR    DEC
+#   screen   8        \EOP    \EOR    DEC (superset)
+#   linux    8        \E[[A   \E[[C   CP437
+#   ansi     8        none    none    CP437
+#
+# setaf=\E[3%p1%dm is exactly the SGR the engine implements, and the function
+# keys are byte-for-byte what vt102 sent, so nothing that worked stops working.
+# linux would also give colour and would break every function key.
+export TERM=screen
 
 # Tell the kernel how big the screen is.
 #
