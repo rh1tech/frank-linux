@@ -1,0 +1,105 @@
+ARM: let userspace compare-and-exchange when the hardware cannot
+
+CONFIG_ARM_NO_EXCLUSIVES exists because this board has no exclusive monitor
+covering the memory it runs from: F6 measured 0 successful STREX in 1000
+attempts in PSRAM against 1000 in 1000 in SRAM. The kernel builds its atomics
+out of raw_local_irq_save() instead, which is correct on a uniprocessor, and
+stopped caring.
+
+Userspace cannot do that. It cannot mask interrupts, and it has no fallback:
+LDREX/STREX there do not fail in a recoverable way, they never succeed at all,
+so a C library's lock loop spins forever the first time it takes a mutex. What
+that looks like is a machine that mounts its root, execs init, and then does
+nothing, with the program counter parked on the LDREX of a compare-exchange
+retry loop:
+
+  4d63a: ldrex r2, [r4]     <- pc, every time it is sampled
+  4d642: strex r0, r7, [r4]
+  4d648: bne.n 4d63a
+
+Give userspace the same primitive the kernel uses. r0 = expected, r1 = new,
+r2 = pointer; returns 0 if the word was replaced, 1 if it was not, -EFAULT if
+the pointer is bad. The masking is valid for exactly the reasons it is valid in
+asm/cmpxchg.h: one CPU, and with CONFIG_MMU=n the user word is directly
+addressable, so nothing can run between the load and the store.
+
+This is what __kuser_cmpxchg does on MMU targets, and it is why that helper
+cannot be reused here -- it lives in the vectors page, which needs an MMU. The
+syscall number is the one pre-3.x kernels used for this call, before it was
+removed as obsolete.
+
+Only compiled when CONFIG_ARM_NO_EXCLUSIVES is set. Everywhere else userspace
+has working exclusives and does not need the kernel in its critical path.
+
+--- a/arch/arm/include/uapi/asm/unistd.h
++++ b/arch/arm/include/uapi/asm/unistd.h
+@@ -37,5 +37,14 @@
+ #define __ARM_NR_usr32			(__ARM_NR_BASE+4)
+ #define __ARM_NR_set_tls		(__ARM_NR_BASE+5)
+ #define __ARM_NR_get_tls		(__ARM_NR_BASE+6)
++/*
++ * Compare-and-exchange on a userspace word, performed by the kernel.
++ *
++ * This is the number the pre-3.x kernels used for the same call, kept so that
++ * anything which remembers it keeps working. It is only implemented when
++ * CONFIG_ARM_NO_EXCLUSIVES is set; elsewhere userspace has LDREX/STREX and does
++ * not need the kernel's help.
++ */
++#define __ARM_NR_cmpxchg		(__ARM_NR_BASE+0x00fff0)
+ 
+ #endif /* _UAPI__ASM_ARM_UNISTD_H */
+--- a/arch/arm/kernel/traps.c
++++ b/arch/arm/kernel/traps.c
+@@ -654,6 +654,52 @@
+ 	case NR(get_tls):
+ 		return current_thread_info()->tp_value[0];
+ 
++#ifdef CONFIG_ARM_NO_EXCLUSIVES
++	/*
++	 * Compare-and-exchange on behalf of userspace.
++	 *
++	 * r0 = expected, r1 = new, r2 = pointer.  Returns 0 if the word was
++	 * equal to r0 and has been replaced by r1, 1 if it was not, or -EFAULT.
++	 *
++	 * ARM_NO_EXCLUSIVES exists because this hardware has no exclusive
++	 * monitor covering the memory the system runs from, so the kernel builds
++	 * its own atomics out of raw_local_irq_save() instead (see asm/cmpxchg.h).
++	 * Userspace cannot do that -- it cannot mask interrupts -- and it has no
++	 * other option either: LDREX/STREX there do not fail in a way that can be
++	 * retried, they simply never succeed, so a C library's lock loop spins
++	 * forever on its first contended mutex.
++	 *
++	 * The same masking works here because this is the same uniprocessor and
++	 * the same address space: with CONFIG_MMU=n the user word is directly
++	 * addressable, and with interrupts off nothing else can run between the
++	 * load and the store.
++	 *
++	 * This is what __kuser_cmpxchg does for MMU targets, and it is why that
++	 * helper cannot be used here: it lives in the vectors page, which needs
++	 * an MMU to exist.
++	 */
++	case NR(cmpxchg): {
++		unsigned long __user *ptr = (unsigned long __user *)regs->ARM_r2;
++		unsigned long oldval = regs->ARM_r0;
++		unsigned long newval = regs->ARM_r1;
++		unsigned long val, flags;
++		int ret = 1;
++
++		if (!access_ok(ptr, sizeof(*ptr)))
++			return -EFAULT;
++
++		raw_local_irq_save(flags);
++		if (__get_user(val, ptr)) {
++			ret = -EFAULT;
++		} else if (val == oldval) {
++			ret = __put_user(newval, ptr) ? -EFAULT : 0;
++		}
++		raw_local_irq_restore(flags);
++
++		return ret;
++	}
++#endif /* CONFIG_ARM_NO_EXCLUSIVES */
++
+ 	default:
+ 		/* Calls 9f00xx..9f07ff are defined to return -ENOSYS
+ 		   if not implemented, rather than raising SIGILL.  This

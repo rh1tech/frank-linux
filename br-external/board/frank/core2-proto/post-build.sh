@@ -139,7 +139,7 @@ for cand in "$HOST_DIR"/bin/*-uclinuxfdpiceabi-gcc; do
     [ -x "$cand" ] && { CC="$cand"; break; }
 done
 if [ -n "$CC" ]; then
-    for t in mputest memtouch; do
+    for t in mputest memtouch castest; do
         "$CC" -Os -Wall -o "$TARGET_DIR/usr/bin/$t" \
               "$BR2_EXTERNAL_FRANK_LINUX_PATH/board/frank/core2-proto/$t.c"
         "$STRIP" --strip-unneeded "$TARGET_DIR/usr/bin/$t"

@@ -1,0 +1,110 @@
+arm: use a kernel compare-exchange on M-profile
+
+LDREX/STREX need an exclusive monitor, and on the Cortex-M part this
+configuration targets there is none covering the memory the system runs from:
+external memory behind the QSPI interface. Measured, 0 successes in 1000
+attempts there against 1000 in 1000 in internal SRAM.
+
+STREX in that memory does not fail in a way that can be retried. It never
+succeeds. So the compare-exchange retry loop that every mutex in this library
+starts with spins forever, and the first process to take a lock stops the
+machine before it has printed anything:
+
+  4d63a: ldrex r2, [r4]     <- pc, at every sample
+  4d642: strex r0, r7, [r4]
+  4d648: bne.n 4d63a
+
+The kernel has the same problem and answers it by masking interrupts around a
+plain load and store, which is atomic on a uniprocessor. Userspace cannot mask
+interrupts, so it asks the kernel: __ARM_NR_cmpxchg, which ARM Linux provides
+when built with CONFIG_ARM_NO_EXCLUSIVES.
+
+This is not a new idea in this file. The two branches below it do the same
+thing for pre-ARMv6 cores, which also had no usable exclusives, by calling
+__kuser_cmpxchg at a fixed address in the vectors page. That page requires an
+MMU and these parts have none, so the call is a syscall instead.
+
+Everything in this library funnels through this one macro -- include/atomic.h
+builds every other operation on it -- so this is the whole of the change.
+
+The cost is a syscall on the contended path of each atomic. Given the
+alternative is a machine that does not boot, and given that nothing this runs is
+bottlenecked on atomics, that is the right trade.
+
+Note that the guard is architectural (!__ARM_ARCH_ISA_ARM, so M-profile only)
+rather than a configuration option, and that it assumes a kernel providing the
+call. That is true of the target this patch is carried for; it is not something
+to apply blindly to every Cortex-M.
+
+--- a/libc/sysdeps/linux/arm/bits/atomic.h
++++ b/libc/sysdeps/linux/arm/bits/atomic.h
+@@ -71,7 +71,68 @@
+ #define __arch_compare_and_exchange_val_16_acq(mem, newval, oldval) \
+   ({ __arm_link_error (); oldval; })
+ 
+-#ifdef __GCC_HAVE_SYNC_COMPARE_AND_SWAP_4
++#if !defined __ARM_ARCH_ISA_ARM
++/* M-profile: ask the kernel, because the hardware cannot.
++ *
++ * On the Cortex-M part this configuration targets, LDREX/STREX have no
++ * exclusive monitor covering the memory the system runs from -- external
++ * memory behind the QSPI interface. STREX there does not fail in a way that
++ * can be retried; it never succeeds. A compare-exchange retry loop therefore
++ * spins forever the first time a mutex is taken, which stops the first process
++ * before it prints anything.
++ *
++ * The kernel has the same problem and solves it by masking interrupts around a
++ * plain load and store, which is atomic on a uniprocessor. Userspace cannot
++ * mask interrupts, so it asks the kernel to do it: __ARM_NR_cmpxchg, present
++ * when the kernel is built with CONFIG_ARM_NO_EXCLUSIVES.
++ *
++ * This is the same arrangement as the __kuser_cmpxchg branches below, which
++ * exist for pre-ARMv6 cores that likewise had no usable exclusives. Those call
++ * a helper at a fixed address in the vectors page; that page needs an MMU, and
++ * these parts have none, so it is a syscall instead.
++ *
++ * The cost is a syscall per contended-path atomic. That is the price of the
++ * hardware, and it is not the expensive part of anything this runs.
++ */
++static __inline__ int
++__arm_kernel_cmpxchg (unsigned int __oldval, unsigned int __newval,
++		      volatile void *__ptr)
++{
++  register unsigned int __r0 __asm__ ("r0") = __oldval;
++  register unsigned int __r1 __asm__ ("r1") = __newval;
++  register volatile void *__r2 __asm__ ("r2") = __ptr;
++  /* __ARM_NR_BASE + 0x00fff0, spelled out so this header needs no kernel
++     header of its own.  */
++  register unsigned int __r7 __asm__ ("r7") = 0x0ffff0;
++  register int __result __asm__ ("r0");
++
++  __asm__ __volatile__ ("svc\t#0"
++			: "=r" (__result)
++			: "r" (__r0), "r" (__r1), "r" (__r2), "r" (__r7)
++			: "memory", "cc");
++  return __result;
++}
++
++/* Returns the value that was in memory, as the other implementations do: equal
++   to oldval exactly when the exchange happened.  */
++#define __arch_compare_and_exchange_val_32_acq(mem, newval, oldval) \
++  ({ __typeof (*(mem)) __acev_ret;					      \
++     __typeof (*(mem)) __acev_old = (oldval);				      \
++     for (;;)								      \
++       {								      \
++	 __acev_ret = *(volatile __typeof (*(mem)) *) (mem);		      \
++	 if (__acev_ret != __acev_old)					      \
++	   break;							      \
++	 if (__arm_kernel_cmpxchg ((unsigned int) __acev_old,		      \
++				   (unsigned int) (newval), (mem)) == 0)      \
++	   {								      \
++	     __acev_ret = __acev_old;					      \
++	     break;							      \
++	   }								      \
++       }								      \
++     __acev_ret; })
++
++#elif defined __GCC_HAVE_SYNC_COMPARE_AND_SWAP_4
+ #define __arch_compare_and_exchange_val_32_acq(mem, newval, oldval) \
+   __sync_val_compare_and_swap ((mem), (oldval), (newval))
+ 
