@@ -565,6 +565,87 @@ PSRAM must therefore be brought up **before** core 1 is launched, which costs
 the ability to report a PSRAM failure on the console -- that is what the LED is
 for.
 
+## F14. Phase 4: Linux runs on the RP2350's Cortex-M33
+
+```
+[    0.176873] clocksource: Switched to clocksource rp2350-timer0
+[    0.204366] frank-ring 2007e000.ring-console: core-1 ring console, core1_alive=1039551
+[    0.222696] 2007e000.ring-console: ttyFRK0 at MMIO 0x2007e000 is a FRANK-RING
+[    0.223180] printk: legacy console [ttyFRK0] enabled
+[    1.170555] Run /init as init process
+Welcome to Buildroot
+buildroot login: root
+
+~ # cat /proc/cpuinfo
+model name      : ARMv7-M rev 0 (v7ml)
+CPU implementer : 0x41
+CPU part        : 0xd21          <- Cortex-M33
+Hardware        : RP2350 (Device Tree Support)
+
+~ # cat /proc/interrupts
+           CPU0
+ 16:       2808 nvic_irq   0 Edge      rp2350-timer0
+
+~ # cat /proc/self/maps
+11400000-11452000 r-xp  /lib/libuClibc-1.0.52.so
+114c0000-114c8000 rw-p  [stack]
+114cc000-114cf000 rw-p  /bin/busybox
+```
+
+Memory: 5560K of 8192K available, 965K kernel code, 2420K reserved.
+
+Everything the previous findings predicted, working together: interrupt-masked
+atomics in PSRAM (F6/F7), FDPIC userspace with a shared libc (F8/F11), a console
+served by core 1 because the USB controller has no Linux driver (F12/F13), and
+the clock sequence that 504 MHz taught us (F10).
+
+### The bug that hid behind every other symptom
+
+The kernel booted perfectly and hung in `calibrate_delay_converge`, with no
+console output at all. Reading the printk buffer straight out of PSRAM over SWD
+-- rather than trying to fix the console first -- showed the kernel was healthy:
+machine matched, DTB parsed, memory correct, `rp2350-timer: TIMER0 at 1000000
+Hz` registered. It was simply waiting for a tick that never came.
+
+The hardware said the interrupt was ready to fire:
+
+```
+NVIC ISER0 = 0x00000001    IRQ 0 enabled
+NVIC ISPR0 bit 0 = 1       IRQ 0 pending
+PRIMASK    = 0             not masked
+BASEPRI    = 0             not masked
+ICSR       = 0x0041080b    VECTACTIVE=11 (SVCall), VECTPENDING=16 (our IRQ)
+```
+
+Nothing was wrong except two numbers being equal:
+
+```
+SHPR2      = 0x80000000    SVCall priority 0x80
+NVIC IPR0  = 0x80808080    TIMER0 priority 0x80
+```
+
+On ARMv7-M an exception preempts only one of **strictly** higher priority, and
+the v7-M kernel runs permanently inside SVCall in Handler mode. An interrupt at
+equal priority therefore can never be taken -- it just sits pending forever.
+
+`0x80` is `PICO_DEFAULT_IRQ_PRIORITY`: the pico-sdk's NVIC state was leaking
+through the handover into Linux. afboot now disables every interrupt, clears
+every pending bit and zeroes every priority before branching, which is what a
+bootloader should do anyway. Core 1's NVIC is untouched -- on ARMv8-M it is
+core-private, so this cannot disturb the USB service.
+
+### Two smaller ones on the way
+
+**PRIMASK, not BASEPRI.** afboot originally did `cpsid i` before the handover,
+which is the obvious way to enter a kernel. Linux on ARMv7-M masks interrupts
+with BASEPRI and never touches PRIMASK, so a PRIMASK set by the bootloader is
+never cleared by anyone. It now does `cpsie i` instead.
+
+**Reset before attaching, not after.** The console capture opened the port and
+then reset the chip, which disconnects USB and invalidates the file descriptor
+(`OSError: [Errno 6] Device not configured`). afboot's ten-second wait for DTR
+exists precisely so a reader can arrive after the reset.
+
 ## F4. Master flash contents at project start
 
 Both halves arrived carrying an unrelated project's firmware (slave: a SID/6581

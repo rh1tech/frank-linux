@@ -39,7 +39,14 @@ BR2_LINUX_KERNEL_DEFCONFIG="rp2350"
 # A raw Image, not vmlinux or zImage. afboot-rp2350 copies it to a fixed address
 # in PSRAM and branches to the start, so it wants bytes rather than an ELF -- and
 # there is no decompressor on the far side to unpack a zImage.
-BR2_LINUX_KERNEL_IMAGE=y
+#
+# Via the custom target rather than BR2_LINUX_KERNEL_IMAGE, which `depends on
+# BR2_aarch64 || BR2_riscv` and is simply unavailable on 32-bit ARM; setting it
+# is silently ignored and you get the ARM default of zImage. Same mechanism the
+# STM32 NOMMU configs use for xipImage.
+BR2_LINUX_KERNEL_IMAGE_TARGET_CUSTOM=y
+BR2_LINUX_KERNEL_IMAGE_TARGET_NAME="Image"
+BR2_LINUX_KERNEL_IMAGE_NAME="Image"
 
 BR2_LINUX_KERNEL_DTS_SUPPORT=y
 # In-tree, added by patch 0005. Buildroot's custom-DTS path copies files to

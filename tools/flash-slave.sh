@@ -62,40 +62,46 @@ echo "==> flashing slave"
 ./tools/flash.sh slave "build/payload/kernel.bin@$KERNEL_ADDR" >/dev/null
 echo "    bootloader + dtb + kernel written"
 
-# Capture before reset. A kernel prints its boot log exactly once, and afboot
-# waits for a terminal before handing over, so the reader must already be there.
+# Reset first, then attach.
+#
+# The opposite order does not work: opening the port and then resetting the chip
+# disconnects USB, invalidating the file descriptor
+# ("OSError: [Errno 6] Device not configured"). afboot waits up to ten seconds
+# for DTR precisely so a reader can arrive after the reset, and core 1 holds the
+# ring until it does.
 : > "$LOG"
-echo "==> opening console (afboot waits up to 10 s for it)"
+echo "==> resetting slave"
+oocd slave "init" "reset run" "exit" >/dev/null 2>&1 || true
+
+echo "==> attaching to the console"
 python3 - "$LOG" "$TIMEOUT" <<'PY' &
 import glob, sys, time, serial
 log, timeout = sys.argv[1], float(sys.argv[2])
-port = None
-end = time.time() + 30
+port, end = None, time.time() + 25
 while time.time() < end and not port:
-    p = glob.glob("/dev/cu.usbmodemFRANK*")
-    if p:
+    found = glob.glob("/dev/cu.usbmodemFRANK*")
+    if found:
         try:
-            port = serial.Serial(p[0], 115200, timeout=0.3)
+            port = serial.Serial(found[0], 115200, timeout=0.3)
         except Exception:
-            time.sleep(0.5)
+            time.sleep(0.3)
     else:
-        time.sleep(0.5)
+        time.sleep(0.3)
 if not port:
     sys.exit(1)
 deadline = time.time() + timeout
 with open(log, "ab", buffering=0) as f:
     while time.time() < deadline:
-        d = port.read(4096)
+        try:
+            d = port.read(4096)
+        except Exception:
+            break
         if d:
             f.write(d)
 PY
 CAP=$!
 cleanup() { kill "$CAP" 2>/dev/null || true; }
 trap cleanup EXIT
-
-sleep 3
-echo "==> resetting slave"
-oocd slave "init" "reset run" "exit" >/dev/null 2>&1 || true
 
 PROMPT='~ #|/ #|login:|Welcome to Buildroot'
 DEADLINE=$(( $(date +%s) + TIMEOUT ))

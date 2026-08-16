@@ -44,8 +44,19 @@ See [docs/hw-findings.md](docs/hw-findings.md) F3.
 
 ## Status
 
-**Phase 3 complete.** Linux boots on this board (RISC-V), and an ARM NOMMU
-kernel with FDPIC userspace boots under QEMU.
+**Phase 4 complete. Linux runs on the RP2350's Cortex-M33.**
+
+```
+~ # cat /proc/cpuinfo
+CPU part        : 0xd21          <- Cortex-M33
+Hardware        : RP2350 (Device Tree Support)
+~ # cat /proc/interrupts
+ 16:       2808 nvic_irq   0 Edge      rp2350-timer0
+```
+
+As far as we know this is the first Linux to run on this core. Console served by
+core 1 over USB CDC, FDPIC userspace with a shared libc, interrupt-masked
+atomics, 8 MB of PSRAM as system RAM.
 
 `tools/check.sh` — the harness, validated against known-good firmware:
 

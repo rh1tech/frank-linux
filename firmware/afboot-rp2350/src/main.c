@@ -37,7 +37,6 @@
 
 #include "hardware/clocks.h"
 #include "hardware/structs/qmi.h"
-#include "hardware/structs/scb.h"
 #include "hardware/vreg.h"
 #include "pico/stdlib.h"
 
@@ -246,6 +245,45 @@ static uint32_t copy_payload(uint32_t flash_addr, uint32_t ram_addr,
 }
 
 /*
+ * Hand the kernel a clean NVIC.
+ *
+ * The pico-sdk leaves every interrupt at PICO_DEFAULT_IRQ_PRIORITY, which is
+ * 0x80 -- and Linux sets SVCall to 0x80 as well. On ARMv7-M an exception
+ * preempts only one of *strictly* higher priority, and the v7-M kernel runs
+ * permanently inside SVCall (Handler mode), so an interrupt at equal priority
+ * can never be taken.
+ *
+ * The result is a kernel that boots perfectly and then hangs in
+ * calibrate_delay_converge waiting for a tick, with TIMER0 asserting, NVIC
+ * ISER bit set, the IRQ pending in ISPR, PRIMASK and BASEPRI both clear, and
+ * nothing wrong anywhere except two equal numbers:
+ *
+ *   SHPR2     = 0x80000000   SVCall priority 0x80
+ *   NVIC IPR0 = 0x80808080   TIMER0 priority 0x80
+ *
+ * So disable everything, clear anything pending, and set every priority to 0.
+ * Linux configures what it needs; it should not have to undo what we left.
+ *
+ * Core 1's NVIC is untouched: on ARMv8-M the NVIC is core-private, so this
+ * cannot disturb the USB service running there.
+ */
+static void nvic_handover_reset(void)
+{
+    volatile uint32_t *nvic_icer = (volatile uint32_t *)0xE000E180u;
+    volatile uint32_t *nvic_icpr = (volatile uint32_t *)0xE000E280u;
+    volatile uint8_t  *nvic_ipr  = (volatile uint8_t  *)0xE000E400u;
+
+    for (int i = 0; i < 8; i++) {
+        nvic_icer[i] = 0xFFFFFFFFu;
+        nvic_icpr[i] = 0xFFFFFFFFu;
+    }
+    for (int i = 0; i < 256; i++)
+        nvic_ipr[i] = 0;
+
+    __asm__ volatile("dsb; isb" ::: "memory");
+}
+
+/*
  * Enter the kernel.
  *
  * Not a function call: the kernel never returns, and it must find the stack and
@@ -259,7 +297,20 @@ static uint32_t copy_payload(uint32_t flash_addr, uint32_t ram_addr,
 static void __attribute__((noreturn)) enter_kernel(uint32_t entry, uint32_t dtb)
 {
     __asm__ volatile(
-        "cpsid   i                  \n" /* no interrupts across the handover  */
+        /*
+         * Clear PRIMASK, do not set it.
+         *
+         * The obvious thing here is `cpsid i` to enter with interrupts off, and
+         * it is fatal. Linux on ARMv7-M masks interrupts with BASEPRI, not
+         * PRIMASK: local_irq_enable() writes BASEPRI and never touches PRIMASK,
+         * so a PRIMASK set by the bootloader is never cleared by anyone and no
+         * interrupt is ever delivered.
+         *
+         * The kernel then boots perfectly and hangs in calibrate_delay_converge
+         * waiting for a jiffy that cannot arrive, with TIMER0 sitting there
+         * asserting INTS=1 and INTR=1 that nothing will service.
+         */
+        "cpsie   i                  \n"
         "mov     r0, #0             \n"
         "mvn     r1, #0             \n" /* ~0: device-tree boot, no machine ID */
         "mov     r2, %[dtb]         \n"
@@ -363,8 +414,14 @@ int main(void)
      * starts writing to the same ring. */
     sleep_ms(50);
 
-    scb_hw->vtor = RAM_KERNEL_ADDR;
-    __asm__ volatile("dsb; isb" ::: "memory");
-
+    /*
+     * VTOR is deliberately not touched.
+     *
+     * An earlier version pointed it at the kernel's entry address, which is
+     * code and not a vector table. The kernel's own __v7m_setup installs its
+     * vectors during head-nommu.S, which is why the QEMU boot wrapper does not
+     * set VTOR either -- and that one boots.
+     */
+    nvic_handover_reset();
     enter_kernel(RAM_KERNEL_ADDR, RAM_DTB_ADDR);
 }

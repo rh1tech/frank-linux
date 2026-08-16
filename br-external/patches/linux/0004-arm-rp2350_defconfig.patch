@@ -112,9 +112,13 @@ stack is pure overhead in 8 MB.
 +# TIMER0 as clocksource and clockevent; ARMV7M_SYSTICK gives only the former.
 +CONFIG_CLKSRC_RP2350=y
 +
-+# The MPU is real here -- PMSAv8, unified, 8 regions (hw-findings F6) -- unlike
-+# the Cortex-M3 QEMU target where PMSAv7 could not describe the memory map.
-+CONFIG_ARM_MPU=y
++# The MPU is off for first boot.
++#
++# The hardware has a real one -- PMSAv8, unified, 8 regions (hw-findings F6) --
++# but the kernel's region layout covers system RAM, and this board's console
++# lives in SRAM at 0x2007e000, outside it. Bring the board up first and turn the
++# MPU on as a separate, testable step.
++# CONFIG_ARM_MPU is not set
 +
 +CONFIG_OF=y
 +CONFIG_USE_OF=y
