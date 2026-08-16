@@ -11,7 +11,21 @@ set -euo pipefail
 PROBE_SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 : "${OPENOCD:=openocd}"
-: "${ADAPTER_SPEED:=5000}"
+# SWD clock, in kHz.
+#
+# 1 MHz, not the 5 MHz this used to run at. Once the master drives HDMI -- eight
+# differential pairs switching at 252 MHz on GPIO12..19 -- SWD at 5 MHz becomes
+# unreliable on that half: reads fail intermittently, and openocd reports it as
+# "Error connecting DP: cannot read IDR", "Failed to read memory at 0x...", or
+# "Could not load data into target bounce buffer" part way through a flash
+# write. The last one is the damaging case, because the erase has already
+# happened: the chip is left with no valid image, boots nothing, wedges, and
+# every step after that reports some unrelated problem.
+#
+# Measured directly: with the display running, examination fails every time at
+# 5000 and succeeds every time at 1000 and 200. The cost is a slower flash
+# write, which is worth it.
+: "${ADAPTER_SPEED:=1000}"
 
 # RP2350 SYSINFO, from the SDK's addressmap.h / sysinfo.h. Part of this file's
 # interface: scripts that source it read these, so shellcheck cannot see the use.

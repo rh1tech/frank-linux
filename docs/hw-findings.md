@@ -819,6 +819,35 @@ stall it, while block requests can still wait seconds for a busy card.
 
 Every one of these presented as silence somewhere unrelated to its cause.
 
+## F20. The real cause: SWD at 5 MHz stops working once HDMI runs
+
+Everything in F19 -- the failed flash writes, the wedged master, the
+"Could not load data into target bounce buffer", the chip that could not even be
+identified -- came from one thing, and it was not the firmware.
+
+The harness ran SWD at 5 MHz. Once the master drives HDMI, eight differential
+pairs switching at 252 MHz on GPIO12..19, that stops being reliable on the
+master half. Measured directly, with the display running:
+
+| adapter speed | result |
+|---|---|
+| 5000 kHz | `Error connecting DP: cannot read IDR`, every time |
+| 1000 kHz | examination succeeds, every time |
+| 200 kHz | examination succeeds, every time |
+
+The default is 1000 now. Three consecutive clean runs of the Phase 6 gate
+followed, after an afternoon in which no two failures looked alike.
+
+The reason it was so expensive to find is that a marginal SWD link does not fail
+as "SWD is marginal". It fails as a flash write that verifies wrong, and by then
+the erase has happened, so the half has no valid image, wedges on boot, and the
+next thing to touch it reports something else entirely. Every symptom pointed at
+whatever code had most recently changed.
+
+The lesson worth keeping: when unrelated failures start appearing together after
+a change in what the hardware is *doing* rather than what it is *running*,
+suspect the measurement path before the thing being measured.
+
 ## F19. What running a display does to the flashing harness
 
 The master half became much harder to flash once it drove HDMI, and the reason
