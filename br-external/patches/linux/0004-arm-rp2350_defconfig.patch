@@ -25,7 +25,7 @@ stack is pure overhead in 8 MB.
 
 --- /dev/null
 +++ b/arch/arm/configs/rp2350_defconfig
-@@ -0,0 +1,162 @@
+@@ -0,0 +1,175 @@
 +CONFIG_NO_HZ_IDLE=y
 +CONFIG_HIGH_RES_TIMERS=y
 +CONFIG_PREEMPT_VOLUNTARY=y
@@ -34,7 +34,20 @@ stack is pure overhead in 8 MB.
 +CONFIG_EXPERT=y
 +# CONFIG_UID16 is not set
 +CONFIG_BASE_SMALL=y
-+# CONFIG_FUTEX is not set
++# Futexes, which NPTL cannot work without.
++#
++# mps2_defconfig turns this off, reasonably: that board's userspace has no
++# threads. Ours does now, and every pthread mutex in uClibc ends in a futex
++# syscall -- which without this returns -ENOSYS, so __lll_lock_wait() waits for
++# a wake that cannot come. The symptom is not an error. init execs, prints
++# nothing, and the machine sits there:
++#
++#   Run /sbin/init as init process
++#   <nothing>
++#
++#   pc = __lll_lock_wait + 0x34
++#   lr = __pthread_mutex_lock_internal + 0x51
++CONFIG_FUTEX=y
 +# CONFIG_EPOLL is not set
 +# CONFIG_SIGNALFD is not set
 +# CONFIG_EVENTFD is not set

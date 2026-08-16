@@ -819,6 +819,75 @@ stall it, while block requests can still wait seconds for a busy card.
 
 Every one of these presented as silence somewhere unrelated to its cause.
 
+## F28. NPTL needs futexes, and the kernel had them switched off
+
+Turning on threads to get glib, and with it Midnight Commander, produced a
+machine that boots and then does nothing:
+
+```
+[    0.488209] VFS: Mounted root (romfs filesystem) readonly on device 31:3.
+[    0.490783] Run /sbin/init as init process
+<nothing, and no response to input>
+```
+
+No panic, so init did not die. No `MPU fault` line, so it did not fault. It
+simply never printed anything -- and busybox init prints nothing of its own, so
+there was no way to tell from the console whether it had hung on its first
+sysinit command or never reached one.
+
+Halting the core over SWD said where it was:
+
+```
+pc  0x1058663a      lr  0x1058ac21
+sp  0x11657930      psp 0x11657930      <- psp == sp, so this is user mode
+```
+
+`pc` is in the flash window, which means userspace executing in place. The romfs
+is flashed at 0x10500000, so that is offset 0x8663a into the image, and
+`tools/romfs.py` maps offsets to files:
+
+```
+0x1058663a -> /lib/libuClibc-1.0.52.so + 0x4d63a
+0x1058ac21 -> /lib/libuClibc-1.0.52.so + 0x51c21
+```
+
+The library's text segment loads at vaddr 0, so file offset is the address, and
+the symbol table gives:
+
+```
+__lll_lock_wait + 0x34
+__pthread_mutex_lock_internal + 0x51
+```
+
+init was blocked in a pthread mutex, waiting on a futex. And:
+
+```
+# CONFIG_FUTEX is not set
+```
+
+inherited from mps2_defconfig, which is entirely reasonable for a board whose
+userspace has no threads. Every uClibc mutex that contends ends in a futex
+syscall; without the option that syscall returns -ENOSYS, and `__lll_lock_wait()`
+waits for a wake that cannot come. The first contended mutex in the first
+process stops the machine.
+
+**`CONFIG_FUTEX=y`.** It is a required companion to `BR2_PTHREADS_NATIVE`, and
+nothing in either configuration says so: Buildroot offers NPTL for ARM+FDPIC
+without reference to the kernel, and the kernel offers FUTEX under EXPERT
+without reference to what userspace will need.
+
+### What made this cheap
+
+Nothing about the failure was visible from the console, and the temptation was
+to bisect it -- rebuild without threads, rebuild without locale, an hour each.
+Four SWD register reads and a file-offset lookup answered it instead, because
+`pc` in the flash window is not an anonymous address: the rootfs is executed in
+place, so every user-mode `pc` maps to a byte in an image sitting on the build
+host. Execute-in-place was adopted to save RAM (F25); making a stuck process
+self-identifying is a second dividend nobody planned.
+
+---
+
 ## F27. Editing a shell script while it is running
 
 Three gates failed in one run and two of the failures were mine, in a way that

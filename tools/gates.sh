@@ -85,7 +85,12 @@ if [ ${#failed[@]} -ne 0 ]; then
     # look like a short list of gates.
     skipped=()
     for g in "${GATES[@]}"; do
-        case " ${passed[*]} ${failed[*]} " in *" $g "*) ;; *) skipped+=("$g");; esac
+        # :- on both, because `set -u` treats an empty array as unset and the
+        # first run to fail its first gate died here rather than reporting it.
+        case " ${passed[*]:-} ${failed[*]:-} " in
+            *" $g "*) ;;
+            *) skipped+=("$g") ;;
+        esac
     done
     [ ${#skipped[@]} -ne 0 ] && printf 'not run: %s\n' "${skipped[*]}"
     exit 1
