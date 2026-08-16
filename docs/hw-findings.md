@@ -819,60 +819,69 @@ stall it, while block requests can still wait seconds for a busy card.
 
 Every one of these presented as silence somewhere unrelated to its cause.
 
-## F26. The slave's debug port dies when our image runs, and I have not found why
+## F26. A writable XIP window, and an evening spent blaming everything else
 
-Reproducible, and the shape of it is precise:
+The slave's debug port kept dying. The chip carried on running Linux perfectly
+and simply stopped answering SWD -- `cannot read IDR`, at every clock speed,
+surviving a soft reset, cleared only by a power cycle.
 
-| state | SWD |
-|---|---|
-| BOOTSEL (ROM running) | answers, `DPIDR 0x4c013477` |
-| our image running | `cannot read IDR`, at 4000/1000/200 kHz |
-| after `reboot -f` (soft reset) | still dead |
-| after power-on | alive again |
+The cause was that the flash was mapped **writable**.
 
-Meanwhile the chip is fine: Linux boots, the console answers, `yes` spins, XIP
-works. Only the debug port is gone. The master, running our firmware all
-evening, is unaffected.
+`pmsav8_setup_io()` maps everything that is not system RAM as device memory with
+`PL1 RW, PL0 RW`, and the RP2350's XIP flash window at 0x10000000 falls in that
+range. So a stray store there does not fault -- it becomes a **QSPI write
+transaction** to the flash chip, which can leave the part in a mode where XIP
+stops returning data. After that:
 
-Dead ends, each tested rather than reasoned about:
+- instruction fetch fails and core 0 locks up: `pc = 0xeffffffe`
+- the debug port often goes with it
+- a soft reset cannot help, because it is the *flash chip* that is confused
+- a power cycle clears it, because that resets the flash chip too
 
-- **not the adapter** -- three clock speeds, `SWD_MULTIDROP`, RISC-V target set,
-  `connect_assert_srst`, the rescue DP, an SRST pulse
-- **not stray processes** holding the probe
-- **not core idle / deep sleep** -- `yes > /dev/null` spinning, still dead
-- **not the wiring** -- the SWD nets are local to each half, chip to J3, nothing
-  else on them, nothing the master drives
-- **not user access to peripherals** -- `pmsav8_setup_io()` mapped everything
-  PL0 read-write, so a stray user store could reach the debug and access-control
-  blocks. Patch 0009 makes those regions privileged-only. It did not fix this.
+Every observation fits, including the ones that made no sense at the time: SWD
+working in BOOTSEL, dying the moment our image ran, and getting much worse
+exactly when nano started overflowing its 32 kB stack (F24) and scattering
+garbage.
 
-Patch 0009 stays regardless: handing user mode read-write access to every
-peripheral on the SoC is wrong on its own terms.
+The state of it caught out one diagnostic after another. Reading flash over SWD
+returned `ab123579 ab123579 ab123579` at three unrelated addresses -- not
+corrupt contents, a dead XIP window returning a constant. And patch 0008, which
+is the fix, appeared not to work: it prevents *new* damage but cannot undo a
+flash chip already in the bad mode, so the first boots after installing it
+looked exactly like the boots before.
 
-That the state survives a soft reset and clears only on power-on means it is
-latched -- a power domain or a sticky register, set once. Bisecting afboot
-against Linux therefore needs a power cycle per attempt, which is why this is
-recorded rather than solved.
+### The fix
 
-**The practical consequence matters more than the cause.** Every gate flashes
-through SWD, so a dead debug port stops the project. The answer is to stop
-depending on it: `picotool` can write flash through the ROM bootloader, and the
-firmware can expose the vendor interface that lets `picotool reboot -f` reach
-that bootloader from any state -- no SWD, no button. See F27.
+- **0008** gives the ROM window its own MPU region: Normal memory, **read-only**,
+  executable. Stray writes now fault instead of reaching the QSPI. This was
+  written to make execute-in-place work (F25) and turns out to matter far more
+  than that.
+- **0009** removes PL0 write access from every peripheral, shrinking what a wild
+  userspace pointer can reach at all.
 
-### Two tooling faults this exposed
+Verified together on a power-cycled board: SWD answers before boot, after boot,
+with Linux logged in, and after running a binary out of flash.
 
-`rescue()` could never have worked. `rescue_reset` in rp2350.cfg calls `init`,
-and `init` needs a working DP -- so every "rescuing..." message printed during a
-dead port was noise, and the recoveries came from power cycles. It now says
-plainly that BOOTSEL is required.
+### What it cost, and why
 
-`assert_half` halted the image 30 ms after reset, to stop the master's video DMA
-fighting the flash write (F19). On the slave that lands inside `psram_init()`'s
-QMI reconfiguration. The window is per-role now with the reason written next to
-each number -- though it turned out not to be the cause of this.
+Five power cycles of the user's time, because I kept reasoning instead of
+measuring. I proposed swapping probe cables on a board whose owner had touched
+nothing; I asserted "not hardware" and "not software" in turn without a test
+that could separate them; and I twice offered a fix -- `DMA_CHAN_ABORT`, then a
+USB reset interface -- that I could not verify before flashing, one of which
+broke enumeration and cost another recovery.
 
-## F25. Execute-in-place from flash: 384 kB of program text for no RAM
+What finally worked was the cheapest thing available from the start: disable the
+two suspects, power-cycle once, and re-enable them one at a time. Three builds,
+one button press, and the answer -- after an evening of hypotheses that each
+explained the symptom and none of which were tested.
+
+The `ab123579` reads were the moment to stop theorising. A constant repeating at
+three unrelated addresses is not memory; it is a bus returning nothing, and that
+question -- *why can this chip not read its own flash?* -- was the one worth
+asking four hours earlier.
+
+## F25. Execute-in-place from flash## F25. Execute-in-place from flash: 384 kB of program text for no RAM
 
 ```
 # /mnt/rom/bin/busybox echo XIP_RUNS_FROM_FLASH
