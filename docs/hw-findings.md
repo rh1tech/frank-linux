@@ -819,6 +819,48 @@ stall it, while block requests can still wait seconds for a busy card.
 
 Every one of these presented as silence somewhere unrelated to its cause.
 
+## F27. Editing a shell script while it is running
+
+Three gates failed in one run and two of the failures were mine, in a way that
+took a while to see because the errors pointed at the board.
+
+`test-vi.sh` died with
+
+```
+./tools/flash-slave.sh: line 69: /payload/kernel.bin: No such file or directory
+```
+
+There is no such path in the script. The line it names is
+`wrap "$KERNEL" build/payload/kernel.bin`, which is not a redirection and cannot
+produce that message.
+
+**Bash reads a script lazily, as a byte offset into an open file.** It does not
+load the whole thing and it does not keep a copy. I had edited
+`tools/flash-slave.sh` while a gate was running it -- adding five lines of
+comment near the top -- and the running shell resumed reading at the offset it
+had reached, which was now five lines further into a different part of the file.
+It executed the tail of one line as the whole of another.
+
+The same mistake, in a different form, cost the run before: I started a build
+whose final step copies fresh images into `build/core2-slave/`, while gates were
+flashing from that directory. That one produced `bootloader did not run`, which
+reads exactly like a board fault.
+
+Neither is a race that shows up under load or once in a hundred runs. Both are
+certain, given the overlap.
+
+**The rule:** while a gate is running, the working tree is the gate's, not
+mine. Editing anything under `tools/` or `build/` during a run means the result
+is not evidence about the code -- it is evidence about a file that no longer
+exists in the form that was being read.
+
+This also explains a class of failure I have blamed on the hardware more than
+once. `probe.sh` and `flash-slave.sh` are sourced and executed by every gate; an
+edit to either mid-run corrupts whichever gate is in flight, and the symptom is
+always the board failing to respond.
+
+---
+
 ## F26. A writable XIP window, and an evening spent blaming everything else
 
 The slave's debug port kept dying. The chip carried on running Linux perfectly
@@ -881,7 +923,7 @@ three unrelated addresses is not memory; it is a bus returning nothing, and that
 question -- *why can this chip not read its own flash?* -- was the one worth
 asking four hours earlier.
 
-## F25. Execute-in-place from flash## F25. Execute-in-place from flash: 384 kB of program text for no RAM
+## F25. Execute-in-place from flash: 384 kB of program text for no RAM
 
 ```
 # /mnt/rom/bin/busybox echo XIP_RUNS_FROM_FLASH
