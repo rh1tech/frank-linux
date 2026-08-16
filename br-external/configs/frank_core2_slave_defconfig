@@ -22,7 +22,18 @@ BR2_TOOLCHAIN_BUILDROOT_UCLIBC=y
 # defaults to 2.6.x. Left alone it builds an entire FDPIC toolchain and then
 # refuses: "Incorrect selection of kernel headers: expected 2.6.x, got 6.15.x".
 BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_15=y
-BR2_PTHREADS_NONE=y
+# NPTL, which is available here despite the missing MMU:
+#
+#   config BR2_PTHREADS_NATIVE
+#       depends on BR2_USE_MMU || ((BR2_arm || BR2_armeb) && BR2_BINFMT_FDPIC)
+#
+# ARM plus FDPIC is exactly this configuration, so uClibc's native threads are
+# explicitly supported and nothing needs patching to get them. Worth stating
+# because it is surprising: threads on a machine with no address translation
+# sound like they should be the hard part, and it is fork() that is impossible,
+# not threads. glib2 -- and so mc -- needs threads and would otherwise be out of
+# reach for a reason that does not actually apply.
+BR2_PTHREADS_NATIVE=y
 BR2_OPTIMIZE_S=y
 
 # Stripping is done by our own post-build script, not by BR2_STRIP_strip:
@@ -106,6 +117,18 @@ BR2_PACKAGE_BUSYBOX_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_FRANK_LINUX_PATH)/boar
 # change and br-external/patches/nano/ for the sites themselves.
 BR2_PACKAGE_NANO=y
 # BR2_PACKAGE_NANO_TINY is not set
+
+# Midnight Commander, with ncurses rather than slang and no subshell.
+#
+# The subshell is the part that genuinely needs fork(): mc keeps a real shell
+# alive behind the panels and talks to it, which cannot be done by exec'ing
+# something once. Without it the panels, the internal viewer and the internal
+# editor all still work, and that is what mc is wanted for here.
+#
+# It lands in flash rather than RAM, which is what makes it affordable at all --
+# mc plus glib is several MB, and on an 8 MB machine that is the whole budget if
+# it has to be resident. Executed in place it costs only its data.
+BR2_PACKAGE_MC=y
 
 # TERM, PATH and the prompt. profile.d rather than replacing /etc/profile, so
 # Buildroot's skeleton keeps working.

@@ -41,12 +41,14 @@ genromfs -a 4096 -d "$TARGET_DIR" -f "$BINARIES_DIR/rootfs.romfs" -V "FRANK"
 size=$(( $(stat -c %s "$BINARIES_DIR/rootfs.romfs") ))
 echo "post-image: rootfs.romfs ${size} bytes ($((size / 1024)) kB)"
 
-# The partition in the device tree is 8 MB at flash offset 0x800000. Overflowing
-# it would run into nothing -- the flash ends there -- so say so here rather
-# than let flash.sh write past the end.
-limit=$((8 * 1024 * 1024))
+# The partition in the device tree is 11 MB at flash offset 0x500000, and the
+# flash ends at 16 MB. Overflowing runs off the end of the chip, so say so here
+# rather than let flash.sh write past it and leave a rootfs that mounts and is
+# then truncated somewhere in the middle of a file.
+limit=$((11 * 1024 * 1024))
 if [ "$size" -gt "$limit" ]; then
-    echo "post-image: rootfs.romfs is larger than the 8 MB rootfs partition" >&2
+    echo "post-image: rootfs.romfs is ${size} bytes, larger than the 11 MB" \
+         "rootfs partition -- see the flash map in tools/flash-slave.sh" >&2
     exit 1
 fi
 exit 0

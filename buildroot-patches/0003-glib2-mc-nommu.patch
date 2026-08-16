@@ -1,0 +1,96 @@
+glib2 and mc: the MMU dependency is about fork(), so say what replaces it
+
+Both packages carry `depends on BR2_USE_MMU`, and both comments give the same
+reason: fork(). That is true and it is not the whole story, because neither
+package needs fork() to do the thing it is wanted for here.
+
+mc is a file manager with an internal editor and viewer. Built --without-subshell
+it browses, copies, views and edits without creating a process at all; the fork
+sites are the subshell, the "execute this file" path, and the extfs helpers that
+read archives. glib is pulled in as a utility library -- lists, strings, UTF-8 --
+and its fork() lives in gspawn.c, which mc only reaches through those same
+paths.
+
+So the dependency is removed and the fork sites are dealt with directly:
+posix_spawn where the child execs immediately, and a loud failure where it does
+not. See br-external/patches/libglib2/ and br-external/patches/mc/.
+
+The `comment` blocks lose their BR2_USE_MMU dependency too. Left in place they
+would hide the "needs a toolchain w/ threads, wchar" message on exactly the
+configuration that now has to read it.
+
+Note that threads, which sound like the harder requirement, were never a
+problem: BR2_PTHREADS_NATIVE is `depends on BR2_USE_MMU || ((BR2_arm ||
+BR2_armeb) && BR2_BINFMT_FDPIC)`, and ARM+FDPIC is this board. NPTL without an
+MMU is explicitly supported upstream.
+
+diff --git a/package/libglib2/Config.in b/package/libglib2/Config.in
+index a875203d..725ef5b4 100644
+--- a/package/libglib2/Config.in
++++ b/package/libglib2/Config.in
+@@ -2,7 +2,6 @@ config BR2_PACKAGE_LIBGLIB2
+ 	bool "libglib2"
+ 	depends on BR2_USE_WCHAR # gettext
+ 	depends on BR2_TOOLCHAIN_HAS_THREADS
+-	depends on BR2_USE_MMU # fork()
+ 	select BR2_PACKAGE_HOST_QEMU if BR2_PACKAGE_GOBJECT_INTROSPECTION
+ 	select BR2_PACKAGE_HOST_QEMU_LINUX_USER_MODE if BR2_PACKAGE_GOBJECT_INTROSPECTION
+ 	select BR2_PACKAGE_LIBICONV if !BR2_ENABLE_LOCALE
+@@ -15,7 +14,6 @@ config BR2_PACKAGE_LIBGLIB2
+ 	  https://www.gtk.org/
+ 
+ comment "libglib2 needs a toolchain w/ wchar, threads"
+-	depends on BR2_USE_MMU
+ 	depends on !BR2_USE_WCHAR || !BR2_TOOLCHAIN_HAS_THREADS
+ 
+ source "package/libglib2/libglib2-bootstrap/Config.in"
+diff --git a/package/mc/Config.in b/package/mc/Config.in
+index ac512116..457a8d0d 100644
+--- a/package/mc/Config.in
++++ b/package/mc/Config.in
+@@ -2,7 +2,6 @@ config BR2_PACKAGE_MC
+ 	bool "mc"
+ 	depends on BR2_USE_WCHAR # libglib2
+ 	depends on BR2_TOOLCHAIN_HAS_THREADS # libglib2
+-	depends on BR2_USE_MMU # libglib2, slang
+ 	select BR2_PACKAGE_LIBGLIB2
+ 	# mc prefers slang, but can use ncurses too
+ 	select BR2_PACKAGE_SLANG if !BR2_PACKAGE_NCURSES
+@@ -17,4 +16,3 @@ config BR2_PACKAGE_MC
+ 
+ comment "mc needs a toolchain w/ threads, wchar"
+ 	depends on !BR2_TOOLCHAIN_HAS_THREADS || !BR2_USE_WCHAR
+-	depends on BR2_USE_MMU
+diff --git a/package/mc/mc.mk b/package/mc/mc.mk
+index 9401b8a1..30c5a2d5 100644
+--- a/package/mc/mc.mk
++++ b/package/mc/mc.mk
+@@ -10,6 +10,28 @@ MC_SITE = http://ftp.midnight-commander.org
+ MC_LICENSE = GPL-3.0+
+ MC_LICENSE_FILES = COPYING
+ MC_DEPENDENCIES = libglib2 host-pkgconf $(TARGET_NLS_DEPENDENCIES)
++# Two groups of things this board cannot have.
++#
++# Needs a copy of a running mc, which NOMMU cannot make:
++#   --without-subshell    mc keeps a real shell alive behind the panels and
++#                         talks to it over a pty. That cannot be expressed as
++#                         "exec something once", so it is the one feature that
++#                         genuinely requires fork().
++#   --disable-background  file operations that continue in a second copy of mc.
++#
++# Needs a network, which this kernel does not have at all:
++#   --disable-vfs-ftp --disable-vfs-shell
++#
++# Everything else stays: the panels, the internal viewer and editor, find-file,
++# and the tar and cpio filesystems, which mc reads in-process rather than by
++# running a helper. External programs still work -- my_systemv() execs them
++# through posix_spawn (br-external/patches/mc/0001).
++MC_CONF_OPTS += \
++	--without-subshell \
++	--disable-background \
++	--disable-vfs-ftp \
++	--disable-vfs-shell
++
+ MC_CONF_ENV = \
+ 	CFLAGS="$(TARGET_CFLAGS) -std=c99" \
+ 	LIBS=$(TARGET_NLS_LIBS)

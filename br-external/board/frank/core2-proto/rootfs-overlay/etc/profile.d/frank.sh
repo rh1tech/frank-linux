@@ -27,6 +27,16 @@ export EDITOR=vi
 # flash copy is the one you want.
 export PATH=$PATH:/mnt/sd/bin
 
+# Somewhere writable for programs that keep state.
+#
+# HOME is /root, which is on the read-only romfs, so anything following the XDG
+# defaults (~/.config, ~/.cache, ~/.local/share) fails to save and, in mc's
+# case, complains about it on every start. Point them at /tmp instead: none of
+# this is worth persisting on a machine with no clock, and /tmp is ramfs.
+export XDG_CONFIG_HOME=/tmp/config
+export XDG_CACHE_HOME=/tmp/cache
+export XDG_DATA_HOME=/tmp/share
+
 # Two lines so a wrapped command does not scroll the prompt off an 80x25 screen.
 export PS1='\w
 # '

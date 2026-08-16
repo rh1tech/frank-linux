@@ -43,9 +43,11 @@ echo "==> flashing the slave and booting Linux"
 SLAVE_TIMEOUT=45 ./tools/flash-slave.sh || die "the slave did not boot Linux"
 
 echo "==> testing the disk"
-# The driver's registration line is in the boot log, because Linux was already
-# running by the time this attaches; the mount is in the session below. Both
-# halves of the evidence are needed, so the assertions run over the two joined.
+# The driver's registration line and the mount are both in the boot log, because
+# Linux was already running by the time this attaches and /etc/init.d/S30sd
+# mounts the card at boot. The session below reads the result rather than
+# repeating the mount -- doing it again gets "Can't open blockdev", since the
+# device is already held, which is a success that looks exactly like a failure.
 cp logs/slave-boot.log "$LOG"
 python3 - "$LOG" <<'PY'
 import sys
@@ -57,10 +59,15 @@ c = Console(settle=1.0)
 c.send("", 2)
 c.send("root", 3)
 c.send("cat /sys/block/frankblk0/size")
-c.send("ls /dev/frankblk0p1")
-c.send("mkdir -p /mnt/sd; mount -o ro /dev/frankblk0p1 /mnt/sd 2>&1", 8)
+c.send("mount | grep /mnt/sd", 4)
 c.send("ls /mnt/sd | head -20", 6)
-c.send("umount /mnt/sd; echo BLKTEST_DONE", 4)
+# Read a real byte off the card rather than trusting the directory listing:
+# a listing comes out of the FAT driver's own caches, and the point of this
+# gate is that sectors crossed the link.
+# tail -1, not head -1: the signature is the last two bytes of the sector, and
+# -v so od does not fold repeated lines and take the last one with it.
+c.send("dd if=/dev/frankblk0p1 bs=512 count=1 2>/dev/null | od -v -An -tx1 | tail -1", 6)
+c.send("echo BLKTEST_DONE", 3)
 
 open(log, "ab").write(c.buf)
 print(c.text()[-2500:])
@@ -74,11 +81,11 @@ echo
 # the shell echoing the command back. Both are the same mistake -- grepping for
 # a string that appears whether or not the thing worked.
 #
-# These three cannot be faked by an error message:
+# These cannot be faked by an error message:
 #   - the driver prints its size line only after add_disk() succeeds
 #   - "frankblk0: p1" means the block layer parsed a partition table that came
 #     over the link, so real sectors were read
-#   - mounting and listing means the FAT driver agreed too
+#   - the mount line comes from /proc/mounts, so the kernel is the one saying it
 if ! grep -qa "sectors .* over the link" "$LOG"; then
     die "frank-blk did not register a disk (log: $LOG)"
 fi
@@ -88,8 +95,19 @@ fi
 if ! grep -qa "BLKTEST_DONE" "$LOG"; then
     die "shell did not respond (log: $LOG)"
 fi
-# The listing has to contain something, and "ls: ... No such file" must not count.
-if grep -qa "mount: mounting .* failed" "$LOG"; then
-    die "the card would not mount (log: $LOG)"
+if ! grep -qa "Mounting the SD card: OK" "$LOG"; then
+    die "the card was not mounted at boot (log: $LOG)"
 fi
-echo "PASS  Phase 5: microSD mounted from Linux over the link"
+# From /proc/mounts via `mount`, so this is the kernel's account of the mount
+# and not the init script's opinion of what it did.
+if ! grep -qa "/dev/frankblk0p1 on /mnt/sd type vfat" "$LOG"; then
+    die "the card is not mounted where it should be (log: $LOG)"
+fi
+# The MBR/VBR signature at the end of sector 0. Every FAT volume has it, and no
+# error message on this console contains "55 aa" -- so this is proof that 512
+# real bytes came off the card, through the master, over the link, and into a
+# process running on the other chip.
+if ! grep -qa "55 aa" "$LOG"; then
+    die "no boot signature in sector 0 -- sectors are not really being read (log: $LOG)"
+fi
+echo "PASS  Phase 5: microSD mounted at boot and read over the link"

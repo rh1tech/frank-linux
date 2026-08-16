@@ -1,0 +1,120 @@
+gspawn, gbacktrace: do not require fork()
+
+A NOMMU system cannot have fork(): without address translation the copy shares
+the parent's memory, so every pointer the child holds still points into the
+parent. uClibc does not provide the symbol on such targets, and referring to it
+is a link error -- or worse, a shared library that loads happily and falls over
+much later, a long way from the cause.
+
+glib is already most of the way there. gspawn's posix_spawn() fast path handles
+the ordinary case, and on a system without fork() it is not a fast path but the
+only path. What is left is to stop referring to fork() when it does not exist:
+
+  - meson checks for it, the same way it already checks for posix_spawn()
+  - the gspawn fallback sets G_SPAWN_ERROR_FORK and says which condition sent
+    it there, rather than being a link-time failure or a late crash
+  - the intermediate-child fork is unreachable once the first one is gone
+  - g_on_error_stack_trace() and g_on_error_query() report ENOSYS. Attaching a
+    debugger to yourself needs a second process; these are developer aids, and
+    saying so beats not linking.
+
+Nothing changes on a system that has fork().
+
+Note that the posix_spawn() path needs a libc whose implementation works
+without fork() -- uClibc's returns ENOSYS on NOMMU whenever file actions are
+passed, which glib always does. See br-external/patches/uclibc/0001.
+
+Upstream status: not submitted.
+
+--- a/meson.build
++++ b/meson.build
+@@ -874,6 +874,14 @@
+   glib_conf.set('HAVE_POSIX_SPAWN', 1)
+ endif
+ 
++# fork() is not universal. A NOMMU target cannot have it -- without address
++# translation the copy would share the parent's memory -- so uClibc does not
++# provide the symbol there at all, and referring to it is a link error rather
++# than something that shows up when the code runs.
++if cc.has_function('fork', prefix : '#include <unistd.h>')
++  glib_conf.set('HAVE_FORK', 1)
++endif
++
+ # Check whether strerror_r returns char *
+ if have_func_strerror_r
+   if cc.compiles('''#define _GNU_SOURCE
+--- a/glib/gspawn-posix.c
++++ b/glib/gspawn-posix.c
+@@ -1475,7 +1475,25 @@
+         goto cleanup_and_fail;
+     }
+   
++#ifdef HAVE_FORK
+   pid = fork ();
++#else
++  /* No fork() on this system, and the posix_spawn() path above either was not
++   * eligible or returned ENOEXEC. There is nothing further to try.
++   *
++   * Failing here rather than at the link stage is the point: a shared library
++   * with an undefined fork() loads happily and only falls over when something
++   * finally spawns, which is a long way from the cause. This says what happened
++   * and which of the conditions above sent it down this path.
++   */
++  g_set_error (error,
++               G_SPAWN_ERROR,
++               G_SPAWN_ERROR_FORK,
++               _("Cannot spawn child process “%s”: this system has no fork(), "
++                 "and the request could not be met by posix_spawn()"),
++               argv[0] != NULL ? argv[0] : "?");
++  goto cleanup_and_fail;
++#endif
+ 
+   if (pid < 0)
+     {
+@@ -1528,7 +1546,12 @@
+            */
+           GPid grandchild_pid;
+ 
++#ifdef HAVE_FORK
+           grandchild_pid = fork ();
++#else
++          /* Unreachable: the parent could not have forked to get here. */
++          grandchild_pid = (pid_t) -1;
++#endif
+ 
+           if (grandchild_pid < 0)
+             {
+--- a/glib/gbacktrace.c
++++ b/glib/gbacktrace.c
+@@ -272,7 +272,15 @@
+   args[2] = buf;
+ #endif
+ 
++#ifdef HAVE_FORK
+   pid = fork ();
++#else
++  /* Attaching a debugger to ourselves needs a second process, and this system
++   * has no fork(). g_on_error_stack_trace() and g_on_error_query() are
++   * developer aids; saying so is better than not linking. */
++  pid = (pid_t) -1;
++  errno = ENOSYS;
++#endif
+   if (pid == 0)
+     {
+       stack_trace (args);
+@@ -397,7 +405,15 @@
+       _exit (0);
+     }
+ 
++#ifdef HAVE_FORK
+   pid = fork ();
++#else
++  /* Attaching a debugger to ourselves needs a second process, and this system
++   * has no fork(). g_on_error_stack_trace() and g_on_error_query() are
++   * developer aids; saying so is better than not linking. */
++  pid = (pid_t) -1;
++  errno = ENOSYS;
++#endif
+   if (pid == 0)
+     {
+       /* Save stderr for printing failure below */

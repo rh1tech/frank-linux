@@ -9,8 +9,12 @@
 #   0x10000000  afboot-rp2350          the bootloader, up to 512 kB
 #   0x100f0000  DTB    + 8-byte header
 #   0x10100000  Image  + 8-byte header
-#   0x10800000  rootfs.romfs           raw, no header -- the kernel reads it in
+#   0x10500000  rootfs.romfs           raw, no header -- the kernel reads it in
 #                                      place through MTD, so nothing copies it
+#
+# The kernel gets 4 MB of the 16 and the rootfs the remaining 11. It used to be
+# the other way round, which made sense while the rootfs travelled inside the
+# kernel image; now the rootfs is the root and is the half that grows.
 #
 # The header is magic ("FRPL") and a length. Without a length the bootloader
 # would have to copy the whole flash window into PSRAM and hope; with it, it
@@ -34,7 +38,7 @@ DTB_ADDR=0x100f0000
 KERNEL_ADDR=0x10100000
 # Matches the "rootfs" partition in the device tree. Written raw: this one is
 # never copied anywhere, the kernel maps it where it lies.
-ROMFS_ADDR=0x10800000
+ROMFS_ADDR=0x10500000
 ROMFS=build/core2-slave/rootfs.romfs
 
 [ -f "$BOOT" ] || die "no $BOOT -- run tools/build-afboot.sh"

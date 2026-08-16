@@ -1,0 +1,158 @@
+lib/utilunix: create processes with posix_spawn(), not fork()
+
+There is no fork() on a NOMMU system and there cannot be one: without address
+translation the copy shares the parent's memory, so every pointer the child
+holds still points into the parent. uClibc does not provide the symbol, so this
+is a link error rather than something that surfaces at runtime.
+
+mc routes all process creation through one wrapper, which makes this small.
+my_systemv() is the only path that matters, and what it did in the child --
+put SIGINT, SIGQUIT, SIGTSTP and SIGCHLD back to SIG_DFL, exec, _exit(127) if
+the exec failed -- is exactly what posix_spawn() does natively, with
+POSIX_SPAWN_SETSIGDEF and those four signals in the mask. The parent is
+unchanged: my_fork_state() already waited for the child before returning, so
+this was always synchronous, and the same waitpid() loop is inlined here.
+
+One behaviour improves. A failed exec used to reach the parent as exit status
+127 and nothing else, because the only thing left to report it was a child that
+had already been created. posix_spawnp() returns the errno directly.
+
+my_fork() itself stays, and fails with ENOSYS. The remaining callers are the
+subshell and background file operations, both of which need a genuine copy of a
+running mc and are configured out (--without-subshell, --disable-background).
+Keeping the function means that anything reaching it by a route we did not
+anticipate stops there, visibly, rather than running.
+
+Upstream status: not submitted. mc supports NOMMU nowhere, and this is one of
+several changes such a port would need.
+
+--- a/lib/utilunix.c
++++ b/lib/utilunix.c
+@@ -54,6 +54,13 @@
+ #include <sys/select.h>
+ #endif
+ #include <sys/wait.h>
++#include <spawn.h>
++#include <unistd.h>
++
++/* POSIX says an application declares this itself. uClibc hides it behind
++   __USE_GNU, and mc compiles with -std=c99, so relying on the header pulling it
++   in is one configure option away from an implicit declaration. */
++extern char **environ;
+ #include <pwd.h>
+ #include <grp.h>
+ 
+@@ -378,7 +385,21 @@
+ pid_t
+ my_fork (void)
+ {
+-    return fork ();
++    /* There is no fork() on a NOMMU system, and there cannot be one: without
++     * address translation the copy would share the parent's memory, so every
++     * pointer the "child" holds would still point into the parent. uClibc does
++     * not provide the symbol at all, which is why leaving this alone is a link
++     * error rather than a runtime surprise.
++     *
++     * Everything mc actually needs a process for goes through my_systemv(),
++     * which execs immediately and is now posix_spawnp(). What is left are the
++     * paths that need a *copy* of a running mc -- the subshell and background
++     * file operations -- and those are configured out (--without-subshell,
++     * --disable-background). This function stays so that anything reached by a
++     * route we did not anticipate fails here, visibly, instead of running.
++     */
++    errno = ENOSYS;
++    return -1;
+ }
+ 
+ /* --------------------------------------------------------------------------------------------- */
+@@ -471,34 +492,71 @@
+ int
+ my_systemv (const char *command, char *const argv[])
+ {
+-    my_fork_state_t fork_state;
++    /* posix_spawn() rather than fork() + execvp().
++     *
++     * This is not a workaround; it is what the original was already doing. The
++     * child did four things -- put SIGINT, SIGQUIT, SIGTSTP and SIGCHLD back to
++     * SIG_DFL, exec, and _exit(127) if the exec failed -- and posix_spawn does
++     * all four itself: POSIX_SPAWN_SETSIGDEF with those four signals in the
++     * mask, and a failed exec reported through the return value rather than
++     * through a child that has to invent an exit status for it.
++     *
++     * The parent behaviour is unchanged. my_fork_state() waited for the child
++     * before returning FORK_PARENT, so this was always synchronous, and the
++     * waitpid() loop below is the same one, moved out of the helper.
++     */
+     int status = 0;
+     my_system_sigactions_t sigactions;
++    posix_spawnattr_t attr;
++    sigset_t defaults;
++    pid_t pid;
++    int err;
+ 
+     my_system__save_sigaction_handlers (&sigactions);
+ 
+-    fork_state = my_fork_state ();
+-    switch (fork_state)
+-    {
+-    case FORK_ERROR:
++    sigemptyset (&defaults);
++    sigaddset (&defaults, SIGINT);
++    sigaddset (&defaults, SIGQUIT);
++    sigaddset (&defaults, SIGTSTP);
++    sigaddset (&defaults, SIGCHLD);
++
++    if (posix_spawnattr_init (&attr) != 0)
+         status = -1;
+-        break;
+-    case FORK_CHILD:
+-        {
+-            my_signal (SIGINT, SIG_DFL);
+-            my_signal (SIGQUIT, SIG_DFL);
+-            my_signal (SIGTSTP, SIG_DFL);
+-            my_signal (SIGCHLD, SIG_DFL);
++    else
++    {
++        (void) posix_spawnattr_setsigdefault (&attr, &defaults);
++        (void) posix_spawnattr_setflags (&attr, POSIX_SPAWN_SETSIGDEF);
++
++        err = posix_spawnp (&pid, command, NULL, &attr, argv, environ);
++        posix_spawnattr_destroy (&attr);
+ 
+-            my_execvp (command, argv);
+-            my_exit (127);      /* Exec error */
++        if (err != 0)
++        {
++            /* The old code could not report this: the exec failed in a child
++             * that had already been created, so all the parent ever saw was an
++             * exit status of 127. Here the error comes straight back. */
++            errno = err;
++            status = -1;
+         }
+-        MC_FALLTHROUGH;
+-        /* no break here, or unreachable-code warning by no returning my_exit() */
+-    default:
+-        status = 0;
+-        break;
++        else
++            while (TRUE)
++            {
++                int wstatus = 0;
++
++                if (waitpid (pid, &wstatus, 0) > 0)
++                {
++                    status = WEXITSTATUS (wstatus) == 0 ? 0 : -1;
++                    break;
++                }
++
++                if (errno != EINTR)
++                {
++                    status = -1;
++                    break;
++                }
++            }
+     }
++
+     my_system__restore_sigaction_handlers (&sigactions);
+ 
+     return status;

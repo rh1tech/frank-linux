@@ -119,7 +119,7 @@ core 1 stack.
 +};
 --- /dev/null
 +++ b/arch/arm/boot/dts/frank/frank-core2-proto-slave.dts
-@@ -0,0 +1,106 @@
+@@ -0,0 +1,116 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * FRANK Core 2 Proto, slave half (U6, RP2350A) -- the half that runs Linux.
@@ -212,15 +212,25 @@ core 1 stack.
 +				read-only;
 +			};
 +
++			/*
++			 * 4 MB for a kernel that is 2.3 MB, and the rest to the
++			 * rootfs. The split was 7/8 when the rootfs was an
++			 * initramfs inside the kernel image and the flash copy
++			 * was a spare; now the flash copy is the root, it is
++			 * the one that grows -- glib and mc together are
++			 * several MB, and they are affordable at all only
++			 * because they are executed in place rather than
++			 * resident.
++			 */
 +			partition@100000 {
 +				label = "kernel";
-+				reg = <0x100000 0x700000>;
++				reg = <0x100000 0x400000>;
 +				read-only;
 +			};
 +
-+			partition@800000 {
++			partition@500000 {
 +				label = "rootfs";
-+				reg = <0x800000 0x800000>;
++				reg = <0x500000 0xb00000>;
 +				read-only;
 +			};
 +		};

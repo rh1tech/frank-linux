@@ -1,0 +1,86 @@
+librt/spawn: use vfork() on NOMMU instead of returning ENOSYS
+
+posix_spawn() uses vfork() when the requested attributes are "safe" and there
+are no file actions, and fork() otherwise. On a NOMMU target there is no fork(),
+so the else branch returns ENOSYS -- and the conditions that lead to it are the
+ordinary ones, not exotic ones:
+
+  - any file actions at all
+  - POSIX_SPAWN_SETSIGDEF or SETSIGMASK, without POSIX_SPAWN_USEVFORK
+
+glib always builds a posix_spawn_file_actions_t, even when it is empty, so its
+posix_spawn fast path can never succeed on NOMMU; it falls back to the fork()
+that does not exist. The interface most useful to a system without fork() is
+thus unavailable on exactly that system.
+
+Use vfork() unconditionally when there is no MMU. Everything __spawni() does
+between the fork point and the execve is safe in a vfork child:
+
+  - it never returns. Every path ends in execve() or _exit(), so the frame it
+    shares with the suspended parent is never popped out from under it, which
+    is the hazard vfork() is warned about.
+  - sigprocmask(), sigaction(), sched_*(), setpgid() and seteuid() change
+    per-task state. vfork() is CLONE_VM|CLONE_VFORK without CLONE_SIGHAND, so
+    the child has its own handler table and the parent's dispositions are
+    untouched.
+  - the file actions are dup2(), open() and close(). vfork() does not pass
+    CLONE_FILES either, so the child has its own descriptor table.
+  - the only writes to shared memory are the alloca() used for the PATH search,
+    below the parent's frame and released by the exec.
+
+The visible difference from fork() is that the parent is suspended until the
+child execs or exits, which for posix_spawn() is the intended flow anyway.
+
+The MMU path is unchanged.
+
+Upstream status: not submitted.
+
+--- a/librt/spawn.c
++++ b/librt/spawn.c
+@@ -120,15 +120,42 @@
+ 	short int flags = attrp ? attrp->__flags : 0;
+ 
+ 	pid_t new_pid;
++#ifdef __ARCH_USE_MMU__
+ 	if (is_vfork_safe(flags) && !fa)
+ 		new_pid = vfork();
+-	else {
+-#ifdef __ARCH_USE_MMU__
++	else
+ 		new_pid = fork();
+ #else
+-		return ENOSYS;
++	/* Without an MMU there is no fork(), so vfork() is not an optimisation
++	   here -- it is the only way to create a process at all. Returning
++	   ENOSYS instead makes posix_spawn() useless on NOMMU for every caller
++	   that passes file actions or asks for signal defaults, which is very
++	   nearly all of them: glib always builds a file-actions list, so its
++	   posix_spawn fast path could never succeed and it fell back to the
++	   fork() that does not exist.
++
++	   Everything __spawni() does between here and the execve is safe in a
++	   vfork child, which is why the restriction can go rather than being
++	   worked around:
++
++	     - it never returns. Every path ends in execve() or _exit(), so the
++	       stack frame it shares with the suspended parent is never popped
++	       out from under it -- which is the hazard vfork() is warned about.
++	     - sigprocmask(), sigaction(), sched_*(), setpgid() and seteuid()
++	       change per-task state. vfork() is CLONE_VM|CLONE_VFORK without
++	       CLONE_SIGHAND, so the child has its own copy of the handler table
++	       and the parent's dispositions are untouched.
++	     - the file actions are dup2(), open() and close(). vfork() does not
++	       pass CLONE_FILES either, so the child gets its own descriptor
++	       table and the parent's fds are untouched.
++	     - the only writes to shared memory are alloca() below the parent's
++	       frame, released by the exec.
++
++	   The visible difference from fork() is that the parent is suspended
++	   until the child execs or exits. For posix_spawn() that is the
++	   intended flow anyway.  */
++	new_pid = vfork();
+ #endif
+-	}
+ 
+ 	if (new_pid) {
+ 		if (new_pid < 0)
