@@ -282,8 +282,11 @@ before a single line of the port had been written.
   translation, so a copied process would hold pointers into its parent. `vfork`
   plus `execve` works and `posix_spawn` is available; anything that needs a real
   copy of the running process — a subshell, a command substitution — has to
-  re-exec itself instead. That is why the shell is BusyBox `hush`, why `nano`
-  needed patching, and why bash and mc are not here yet.
+  re-exec itself instead. That is why the shell is BusyBox `hush` and why `nano`
+  needed patching. bash cannot be ported: five of its seven process-creation
+  sites need a copy of the running shell, one of them being `$( … )`, and the
+  same is true of mksh, dash and ash. See
+  [docs/shell-nommu.md](docs/shell-nommu.md) for the audit and what hush costs.
 - **A user process can still fault on its own heap once memory is exhausted.**
   Seen with leaked allocations under 8 MB; the addresses are inside a region the
   MPU grants, so this is not the MPU, and it is not yet attributed.
