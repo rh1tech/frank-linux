@@ -8,10 +8,10 @@
  * user-facing is on this half -- microSD (J7), HDMI (J5), the USB HID keyboard
  * (J8), the I2S DAC -- so this firmware answers for all of it over the link.
  *
- * This stage serves storage only, and from a RAM disk rather than the card.
- * Proving the block path with memory on this end means that when the SD driver
- * goes in, a failure is the card and not the protocol -- the same reason the
- * console was proven with core 0 standing in for Linux before Linux existed.
+ * This stage serves storage only: the microSD on SPI0 (J7), or a RAM disk if no
+ * card is present. Proving the block path against memory first meant that when
+ * the card went in, a failure was the card and not the protocol -- the same
+ * reason the console was proven with core 0 standing in for Linux.
  *
  * Deliberately does NOT bring up HDMI or the USB HID host yet: F3 measured that
  * enabling the HID host costs this half 3x its memory bandwidth and 20x its link
@@ -29,6 +29,7 @@
 
 #include "link_blk.h"
 #include "link_bus.h"
+#include "storage.h"
 
 #ifndef CPU_SPEED
 #define CPU_SPEED 252
@@ -44,13 +45,8 @@
 #define LINK_DB_IN     42      /* DB_SM */
 #define LINK_FS        40
 
-/*
- * RAM disk. 64 kB is enough to carry a filesystem superblock and prove reads,
- * writes and readback without touching the card; the master's own 8 MB of PSRAM
- * is free (Linux runs on the other half) if this needs to grow.
- */
-#define RAMDISK_SECTORS  128u
-static uint8_t ramdisk[RAMDISK_SECTORS * LINK_BLK_SECTOR];
+static uint32_t capacity_sectors;
+static const char *medium = "none";
 
 static uint8_t xfer[LINK_BLK_MAX_SECTORS * LINK_BLK_SECTOR] __attribute__((aligned(4)));
 static uint8_t reply[sizeof(link_blk_rsp_t)
@@ -92,20 +88,6 @@ static void clocks_bringup(void)
                     48 * MHZ, 48 * MHZ);
 }
 
-/* Fill the RAM disk with something a read can be checked against without the
- * two sides exchanging reference data: sector N starts with N. */
-static void ramdisk_init(void)
-{
-    for (uint32_t s = 0; s < RAMDISK_SECTORS; s++) {
-        uint8_t *p = ramdisk + s * LINK_BLK_SECTOR;
-        for (uint32_t i = 0; i < LINK_BLK_SECTOR; i += 4) {
-            uint32_t v = (s << 16) | i;
-            p[i] = (uint8_t)v; p[i+1] = (uint8_t)(v >> 8);
-            p[i+2] = (uint8_t)(v >> 16); p[i+3] = (uint8_t)(v >> 24);
-        }
-    }
-}
-
 static int32_t do_request(const link_blk_req_t *req)
 {
     if (req->magic != LINK_BLK_MAGIC)
@@ -114,7 +96,7 @@ static int32_t do_request(const link_blk_req_t *req)
         return 0;
     if (req->count == 0 || req->count > LINK_BLK_MAX_SECTORS)
         return -22;
-    if (req->lba + req->count > RAMDISK_SECTORS)
+    if (req->lba + req->count > capacity_sectors)
         return -5;                                      /* -EIO */
     return 0;
 }
@@ -129,10 +111,10 @@ int main(void)
         sleep_ms(200);
     }
     printf("\n=== FRANK master I/O server ===\n");
-    printf("sys_clk %u MHz, ramdisk %u sectors\n",
-           (unsigned)(clock_get_hz(clk_sys) / 1000000u), (unsigned)RAMDISK_SECTORS);
-
-    ramdisk_init();
+    capacity_sectors = storage_init(&medium);
+    printf("sys_clk %u MHz, medium %s, %u sectors (%u KiB)\n",
+           (unsigned)(clock_get_hz(clk_sys) / 1000000u), medium,
+           (unsigned)capacity_sectors, (unsigned)(capacity_sectors / 2u));
 
     link_t link;
     link_init(&link, pio0, LINK_TX_BASE, LINK_RX_BASE,
@@ -180,15 +162,16 @@ int main(void)
             if (link_rx_wait(&link, 2000000) != 0)
                 status = -5;
             else
-                memcpy(ramdisk + req.lba * LINK_BLK_SECTOR, xfer, bytes);
+                status = storage_write(req.lba, req.count, xfer);
         }
 
         /* Status and any read data as one transfer, so the slave arms once and
          * there is no window between two sends for it to miss. */
-        link_blk_rsp_t rsp = { .status = status, .capacity = RAMDISK_SECTORS };
-        memcpy(reply, &rsp, sizeof(rsp));
         if (status == 0 && req.op == LINK_BLK_OP_READ)
-            memcpy(reply + sizeof(rsp), ramdisk + req.lba * LINK_BLK_SECTOR, bytes);
+            status = storage_read(req.lba, req.count, reply + sizeof(link_blk_rsp_t));
+
+        link_blk_rsp_t rsp = { .status = status, .capacity = capacity_sectors };
+        memcpy(reply, &rsp, sizeof(rsp));
 
         uint32_t reply_bytes = sizeof(rsp)
                              + ((status == 0 && req.op == LINK_BLK_OP_READ) ? bytes : 0);

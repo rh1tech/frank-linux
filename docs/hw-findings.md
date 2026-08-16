@@ -723,6 +723,39 @@ probe failure with a clean backtrace. Reading state directly out of the hardware
 (the ring indices, `core1_alive`, the kernel's own `__log_buf` over SWD) found
 each of them; guessing did not.
 
+## F17. The microSD, mounted by Linux over the link
+
+The card is on the master's SPI0 (J7). The half that runs Linux has no slot, so
+every sector crosses the link.
+
+```
+[    0.296323]  frankblk0: p1
+[    0.301135] frank-blk 2007e000.link-block: 15605760 sectors (7802880 KiB) over the link
+~ # mount -o ro /dev/frankblk0p1 /mnt/sd
+~ # ls /mnt/sd
+286  386  APPLE  C64  CMOS.ROM  DOOM  GENESIS  HERETIC
+KICKSTART  MSX  QUAKE  SNES  XT  ZX  cpc
+```
+
+`frankblk0: p1` is the useful line: the block layer parsed a partition table it
+had to read over the link to see, so those are real sectors off a real card and
+not something the driver could have invented. The FAT driver then agreed, and
+the listing is this board's actual emulator card.
+
+The driver is ChaN's FatFs SPI sample, vendored from the FRANK bring-up
+firmware. Only the diskio layer is compiled -- `disk_initialize`, `disk_read`,
+`disk_write`, `disk_ioctl` -- because Linux owns the filesystem. There is no FAT
+code on the master at all.
+
+Mounted read-only, and the gate keeps it that way: this is a card with real data
+on it, and a test that can destroy what it is testing is not a test. Writes are
+proven against the master's RAM disk instead, where `dd` to sector 10 and back
+returns what was written.
+
+If no card answers, the RAM disk stands in and the console says
+`medium ramdisk (NO CARD)` rather than quietly serving 64 kB of pattern that
+looks like a working disk.
+
 ## F4. Master flash contents at project start
 
 Both halves arrived carrying an unrelated project's firmware (slave: a SID/6581

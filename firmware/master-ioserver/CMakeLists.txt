@@ -25,15 +25,22 @@ pico_sdk_init()
 
 add_executable(master-ioserver
     src/main.c
+    src/storage.c
+    sdcard/sdcard.c
     ${FW_ROOT}/common/link_bus.c
 )
 
 pico_generate_pio_header(master-ioserver ${FW_ROOT}/common/link_bus.pio)
 
-target_include_directories(master-ioserver PRIVATE src ${FW_ROOT}/common)
+target_include_directories(master-ioserver PRIVATE src sdcard ${FW_ROOT}/common)
 
 target_compile_definitions(master-ioserver PRIVATE
     CPU_SPEED=${CPU_SPEED}
+    # microSD on J7. The vendored driver defaults to another board's pins.
+    SDCARD_PIN_SPI0_SCK=6
+    SDCARD_PIN_SPI0_MOSI=7
+    SDCARD_PIN_SPI0_MISO=4
+    SDCARD_PIN_SPI0_CS=5
     PSRAM_MAX_FREQ_MHZ=${PSRAM_SPEED}
     FLASH_MAX_FREQ_MHZ=${FLASH_SPEED}
 )
@@ -46,6 +53,7 @@ target_link_libraries(master-ioserver
     hardware_dma
     hardware_gpio
     hardware_pio
+    hardware_spi
     hardware_sync
     hardware_vreg
 )

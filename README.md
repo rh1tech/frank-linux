@@ -56,17 +56,19 @@ Hardware        : RP2350 (Device Tree Support)
 ```
 
 ```
-~ # ls -l /dev/frankblk0
-brw-------  1 root root  254, 0  /dev/frankblk0
-~ # dd if=/tmp/w of=/dev/frankblk0 bs=512 seek=10 && \
-    dd if=/dev/frankblk0 bs=512 count=1 skip=10 | head -1
-test-write
+~ # mount -o ro /dev/frankblk0p1 /mnt/sd
+~ # ls /mnt/sd
+286  386  APPLE  C64  CMOS.ROM  DOOM  GENESIS  HERETIC
+KICKSTART  MSX  QUAKE  SNES  XT  ZX  cpc
 ```
+
+That is the microSD on the *other* RP2350, mounted over the link -- this half
+has no card slot.
 
 As far as we know this is the first Linux to run on this core. Console served by
 core 1 over USB CDC, FDPIC userspace with a shared libc, interrupt-masked
-atomics, 8 MB of PSRAM as system RAM, and a block device the other RP2350
-answers for -- because the slave half has no storage of its own.
+atomics, 8 MB of PSRAM as system RAM, and the microSD the other
+RP2350 answers for, because the slave half has no storage of its own.
 
 `tools/check.sh` — the harness, validated against known-good firmware:
 
