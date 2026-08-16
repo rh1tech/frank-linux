@@ -1,4 +1,4 @@
-gspawn, gbacktrace: do not require fork()
+Build for a target with no fork() and no working atomics
 
 A NOMMU system cannot have fork(): without address translation the copy shares
 the parent's memory, so every pointer the child holds still points into the
@@ -25,7 +25,16 @@ only path. What is left is to stop referring to fork() when it does not exist:
     make a leaked dbus-daemon die with the test process, and that genuinely
     needs a second process outliving this one.
 
-Nothing changes on a system that has fork().
+And one thing that is not about fork() at all, but is the same shape of
+problem -- a capability the compiler reports and the hardware does not have:
+G_ATOMIC_LOCK_FREE is forced off on ARM M-profile. LDREX/STREX there have no
+exclusive monitor covering the memory this runs from, so an inline atomic does
+not terminate. cc.links() cannot see it, because the test compiles and links
+and would only fail by spinning, and meson does not run it when cross-
+compiling. With it off, GLib emulates its atomics with a mutex, which works
+because the C library's mutexes are implemented with a kernel compare-exchange.
+
+Nothing changes on a system that has fork(), or working exclusives.
 
 Note that the posix_spawn() path needs a libc whose implementation works
 without fork() -- uClibc's returns ENOSYS on NOMMU whenever file actions are
@@ -50,6 +59,41 @@ Upstream status: not submitted.
  # Check whether strerror_r returns char *
  if have_func_strerror_r
    if cc.compiles('''#define _GNU_SOURCE
+@@ -2074,8 +2082,33 @@
+ #endif
+ '''
+ 
++# Cortex-M: the compiler has atomic ops, and they do not work.
++#
++# LDREX/STREX need an exclusive monitor, and on the M-profile part this is being
++# built for there is none covering the memory the system runs from -- external
++# memory behind a QSPI interface. STREX there never succeeds. An inline atomic
++# is therefore not merely slow, it does not terminate: the compare-exchange
++# retry loop spins forever on its first use.
++#
++# cc.links() cannot detect that. The test program compiles and links perfectly
++# well; it would only fail by never returning, and meson does not run it when
++# cross-compiling. So ask the architecture instead of the linker.
++#
++# With this false, GLib emulates its atomics with a mutex (gatomic.c). That is
++# correct here: the C library's mutexes on this target are implemented with a
++# kernel-assisted compare-exchange rather than with exclusives, so they work
++# where the inline ops do not.
++arm_m_profile_test = '''
++#if !defined(__arm__) || defined(__ARM_ARCH_ISA_ARM)
++#error not M-profile
++#endif
++int main (void) { return 0; }
++'''
++
+ # We know that we can always use real ("lock free") atomic operations with MSVC
+-if cc.get_id() == 'msvc' or cc.get_id() == 'clang-cl' or cc.links(atomictest, name : 'atomic ops')
++if cc.compiles(arm_m_profile_test, name : 'ARM M-profile without usable exclusives')
++  have_atomic_lock_free = false
++elif cc.get_id() == 'msvc' or cc.get_id() == 'clang-cl' or cc.links(atomictest, name : 'atomic ops')
+   have_atomic_lock_free = true
+   if cc.get_id() == 'gcc' and not cc.compiles(atomicdefine, name : 'atomic ops define')
+     # Old gcc release may provide
 --- a/glib/gspawn-posix.c
 +++ b/glib/gspawn-posix.c
 @@ -1475,7 +1475,25 @@
