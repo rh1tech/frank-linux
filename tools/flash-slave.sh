@@ -33,7 +33,7 @@ KERNEL_ADDR=0x10100000
 
 [ -f "$BOOT" ] || die "no $BOOT -- run tools/build-afboot.sh"
 KERNEL="$IMAGES/Image"
-DTB="$(ls "$IMAGES"/*.dtb 2>/dev/null | head -1 || true)"
+DTB="$(find "$IMAGES" -maxdepth 1 -name '*.dtb' -print -quit 2>/dev/null)"
 [ -f "$KERNEL" ] || die "no $KERNEL -- run 'make slave'"
 [ -n "$DTB" ] || die "no DTB in $IMAGES -- run 'make slave'"
 
