@@ -1,0 +1,69 @@
+nano: build colour and nanorc without libmagic, and give it a usable stack
+
+Two changes to package/nano/nano.mk, both aimed at making the non-tiny build
+actually usable on a NOMMU target.
+
+package/nano/nano.mk enables --enable-color and --enable-nanorc only when
+BR2_PACKAGE_FILE is selected, alongside --enable-libmagic. The three are
+independent options in nano: libmagic is a fallback for identifying a file whose
+extension and first line say nothing, while colour and nanorc are what make the
+non-tiny build worth building. Bundling them costs the whole `file` package and
+its magic database to get syntax highlighting.
+
+The second is a larger stack. NOMMU has no stack guard page and no growth -- the
+kernel allocates exactly what PT_GNU_STACK asks for -- and nano overflows the
+default 32 kB during start-up once nanorc parsing and syntax regexes are on.
+
+Signed-off-by: Mikhail Matveev <xtreme@rh1.tech>
+--- a/package/nano/nano.mk
++++ b/package/nano/nano.mk
+@@ -12,6 +12,8 @@
+ NANO_LICENSE_FILES = COPYING
+ NANO_DEPENDENCIES = ncurses
+ 
++NANO_CONF_ENV += LDFLAGS="$(TARGET_LDFLAGS) -Wl,-z,stack-size=131072"
++
+ ifeq ($(BR2_PACKAGE_NCURSES_WCHAR),y)
+ NANO_CONF_ENV += ac_cv_prog_NCURSESW_CONFIG=$(STAGING_DIR)/usr/bin/$(NCURSES_CONFIG_SCRIPTS)
+ else
+@@ -30,11 +32,38 @@
+ endef
+ else
+ NANO_CONF_OPTS += --disable-tiny
++# Colour and nanorc do not need libmagic.
++#
++# They were bundled with it because syntax definitions can use `magic`
++# directives to identify a file with no recognisable extension. That is a
++# fallback, not a requirement: without libmagic the extension and first-line
++# rules still work, which is how nano decides for nearly every file. Tying them
++# together costs the whole `file` package and its several MB of magic data for
++# a feature most systems never reach -- and on a board with 8 MB of RAM that is
++# the difference between having syntax highlighting and not.
++NANO_CONF_OPTS += --enable-color --enable-nanorc
++
++# A bigger stack than the 32 kB the linker gives by default.
++#
++# NOMMU has no stack guard page and no growth: the kernel allocates exactly what
++# PT_GNU_STACK asks for, and going past it just writes over whatever is next.
++# nano overflows 32 kB during start-up once nanorc parsing and syntax regex
++# compilation are enabled -- observed as a jump to a garbage address with the
++# stack pointer 6 kB below its own base:
++#
++#   nano[35]: MPU fault, data access at 0x111e67d0 (MMFSR 0x92)
++#   PC is at 0x8400b0b0     <- not an address on this machine
++#   sp : 111e67e0           <- below the stack it was given
++#
++# and only when the stack happens to land next to memory the MPU protects. Off
++# an MMU-less system with no MPU it corrupts a neighbour instead and nobody
++# notices. 128 kB, not more: on NOMMU this is one contiguous allocation, and
++# large ones are exactly what fails first as memory fragments.
+ ifeq ($(BR2_PACKAGE_FILE),y)
+ NANO_DEPENDENCIES += file
+-NANO_CONF_OPTS += --enable-libmagic --enable-color --enable-nanorc
++NANO_CONF_OPTS += --enable-libmagic
+ else
+-NANO_CONF_OPTS += --disable-libmagic --disable-color --disable-nanorc
++NANO_CONF_OPTS += --disable-libmagic
+ endif # BR2_PACKAGE_FILE
+ endif # BR2_PACKAGE_NANO_TINY
+ 

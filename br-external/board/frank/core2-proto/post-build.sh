@@ -67,6 +67,26 @@ echo "post-build: stripped target, ${before} kB -> ${after} kB"
 # built to provide. Removing it is honest; making it print OK would not be.
 rm -f "$TARGET_DIR/etc/init.d/S40network"
 
+# Login banner, from version.txt.
+#
+# Buildroot writes /etc/issue from BR2_TARGET_GENERIC_ISSUE, which is a literal
+# string in the defconfig and so would be a second place to remember to bump.
+# version.txt is the one place: "major minor", with the minor zero-padded to two
+# digits the way the FRANK firmware numbers itself, so "1 0" reads v1.00.
+VERSION_FILE="$BR2_EXTERNAL_FRANK_LINUX_PATH/../version.txt"
+if [ -r "$VERSION_FILE" ]; then
+    read -r VER_MAJOR VER_MINOR < "$VERSION_FILE"
+    if [ "$VER_MINOR" -lt 10 ] 2>/dev/null; then
+        VER="$VER_MAJOR.0$VER_MINOR"
+    else
+        VER="$VER_MAJOR.$VER_MINOR"
+    fi
+    printf 'FRANK Linux v%s\n' "$VER" > "$TARGET_DIR/etc/issue"
+    echo "post-build: banner FRANK Linux v$VER"
+else
+    echo "post-build: no version.txt at $VERSION_FILE; leaving /etc/issue alone" >&2
+fi
+
 # Build the MPU probe into the image.
 #
 # It has to be cross-compiled and it is one file, so a full Buildroot package

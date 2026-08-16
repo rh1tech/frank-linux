@@ -55,6 +55,13 @@ BR2_LINUX_KERNEL_DTS_SUPPORT=y
 BR2_LINUX_KERNEL_INTREE_DTS_NAME="frank/frank-core2-proto-slave"
 BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_FRANK_LINUX_PATH)/patches"
 
+# It is not Buildroot, it is this board. The stock banner and hostname say
+# "buildroot", which is the build system rather than the machine.
+#
+# The banner itself is written by post-build.sh from version.txt, so the version
+# lives in one place rather than being duplicated as a literal here.
+BR2_TARGET_GENERIC_HOSTNAME="frank"
+
 # Userspace: BusyBox in an initramfs the kernel carries itself.
 BR2_TARGET_ROOTFS_INITRAMFS=y
 # BR2_TARGET_ROOTFS_TAR is not set
@@ -72,6 +79,16 @@ BR2_PACKAGE_NCURSES_WCHAR=y
 # BusyBox applets the NOMMU default leaves out -- vi, less, awk, find, tar and
 # the memory tools. See the fragment for why each one is here.
 BR2_PACKAGE_BUSYBOX_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_FRANK_LINUX_PATH)/board/frank/core2-proto/busybox.fragment"
+
+# nano, built full rather than --enable-tiny.
+#
+# Upstream Buildroot forces tiny on NOMMU (`select BR2_PACKAGE_NANO_TINY if
+# !BR2_USE_MMU`, commented "full version uses fork()"), which throws away undo,
+# colour syntax, line numbers and nanorc to avoid a handful of call sites. We
+# patch the call sites instead -- see buildroot-patches/ for the Config.in
+# change and br-external/patches/nano/ for the sites themselves.
+BR2_PACKAGE_NANO=y
+# BR2_PACKAGE_NANO_TINY is not set
 
 # TERM, PATH and the prompt. profile.d rather than replacing /etc/profile, so
 # Buildroot's skeleton keeps working.

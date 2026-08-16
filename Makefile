@@ -202,6 +202,9 @@ BRSLAVE = make -C /br O=/out/core2-slave BR2_EXTERNAL=/src/br-external
 slave-config: volumes
 	$(DOCKER_RUN) sh -c '$(BRSLAVE) frank_core2_slave_defconfig'
 
+# Note: this reuses an existing .config. After editing the defconfig, run
+# `make slave-config` first -- otherwise the build succeeds and quietly produces
+# the previous configuration, which looks like the change having no effect.
 slave: volumes
 	$(DOCKER_RUN) sh -c '\
 		test -f /out/core2-slave/.config || $(BRSLAVE) frank_core2_slave_defconfig; \

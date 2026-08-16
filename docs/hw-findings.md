@@ -819,6 +819,102 @@ stall it, while block requests can still wait seconds for a busy card.
 
 Every one of these presented as silence somewhere unrelated to its cause.
 
+## F24. Stage 1: full nano, and two bugs it uncovered
+
+nano needed no source patch. Buildroot forces `--enable-tiny` on NOMMU with the
+comment "full version uses fork()", which costs undo, colour syntax, line
+numbers, the file browser, multibuffer and tab completion. But nano already
+guards every one of its seven `fork()` sites:
+
+```
+src/files.c:1018  #if defined(HAVE_FORK) && defined(HAVE_PIPE) && defined(HAVE_WAITPID)
+src/text.c:2110   #if defined(HAVE_FORK) && defined(HAVE_WAIT)
+src/text.c:2348   #if defined(HAVE_FORK) && defined(HAVE_WAITPID)
+src/text.c:2586   #if defined(HAVE_FORK) && defined(HAVE_WAITPID)
+```
+
+configure sets `ac_cv_func_fork=no`, those paths compile out, and everything
+else builds. What is lost is only what needs to run another program: `^R^X`
+insert-command-output, the spell checker, the formatter and the linter.
+
+The audit method is worth keeping: uClibc has **no `fork` symbol at all** on
+NOMMU, while `unistd.h` still declares it. Anything calling it fails at *link*
+and the linker names the object file. `posix_spawn` and `posix_spawnp` are both
+present, so there is a clean replacement when one is actually needed.
+
+### Colour does not need libmagic
+
+Buildroot enables `--enable-color` and `--enable-nanorc` only alongside
+`--enable-libmagic`, so syntax highlighting costs the whole `file` package and
+its magic database. They are independent options: libmagic is a fallback for a
+file whose extension and first line say nothing. Split apart, highlighting costs
+184 kB of syntax definitions instead of megabytes.
+
+### The stack, and what the MPU was worth
+
+nano crashed at start-up, but only sometimes -- and only when the USB console
+was not attached first, which changes the order allocations happen in. The
+register dump ended the guessing:
+
+```
+nano[35]: MPU fault, data access at 0x111e67d0 (MMFSR 0x92)
+PC is at 0x8400b0b0        <- not an address on this machine
+sp : 111e67e0              <- below the stack it was given
+r3 : 8400b0b0  r2 : 8101b108  r0 : b10eb0b0
+```
+
+`MMFSR 0x92` is MMARVALID | MSTKERR | DACCVIOL: the CPU could not even stack the
+exception frame, because SP itself was invalid. nano had overflowed its 32 kB
+stack by about 6 kB during nanorc parsing and syntax regex compilation,
+overwritten its own frame, and branched to a garbage address.
+
+NOMMU has no guard page and no stack growth: the kernel allocates exactly what
+`PT_GNU_STACK` asks for and anything past it writes over the neighbour. So this
+only *faulted* when the stack happened to land next to memory the MPU protects.
+Everywhere else it silently corrupted whatever was below -- which is what would
+have happened on every run without an MPU. 128 kB now, via
+`-Wl,-z,stack-size=`; note the hyphen, `-z stacksize=` is accepted and then
+ignored with a warning.
+
+### Freed __init memory was unreachable by the processes that were given it
+
+The first boot with a larger initramfs panicked immediately:
+
+```
+Freeing unused kernel image (initmem) memory: 936K
+Kernel panic - not syncing: Attempted to kill init! exitcode=0x0000000b
+```
+
+0x0b is SIGSEGV. `pmsav8_setup()` maps the kernel as one PL0-no-access region
+covering `[KERNEL_START, KERNEL_END)`, and the `__init` sections sit inside it.
+Correct while they hold init code; wrong the moment `free_initmem()` hands those
+936 kB back to the page allocator, because on NOMMU that is the same pool
+userspace allocates from. The first process got some and died on its own memory.
+
+This is mainline's behaviour, not something the RWX split introduced -- the
+single kernel region always covered `__init`. It stayed invisible while the
+initramfs was small enough that the allocator never reached those pages; the
+`memtouch` experiment in F21 looked for exactly this and found nothing, because
+at the time nothing was under enough pressure to be given them.
+
+Fixed by giving the freed range its own region, PL0 readable and writable, in
+`pmsav8_mark_rodata_ro()` -- which runs immediately after `free_initmem()`:
+
+```
+Kernel text 0x11009000-0x111e8000 read-only, data 0x112d2000-0x1132b020 non-executable
+Freed __init 0x111e8000-0x112d2000 returned to user-accessible memory
+```
+
+Seven of eight regions used. A user-mode MPU fault now also prints the faulting
+address, rate-limited: without it, a region-layout mistake presents as a bare
+SIGSEGV with nothing connecting it to the MPU.
+
+| | Stage 0 | Stage 1 |
+|---|---|---|
+| MemFree | 1972 kB | 1496 kB |
+| MemAvailable | 1692 kB | 1232 kB |
+| rootfs.cpio | 1314 kB | 1628 kB |
+
 ## F23. A usable userspace, stage 0: the terminal holds up
 
 ```

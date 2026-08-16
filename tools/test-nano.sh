@@ -71,15 +71,22 @@ from slave_console import Console
 
 c = Console(settle=1.0)
 c.send("", 2)
-c.send("cat /tmp/n.txt", 4)
+# Let the target decide, and emit a sentinel only grep can produce. Asserting
+# on NANO_WROTE_THIS directly passes on failure: the shell echoes the string
+# back in "sh: can't execute 'NANO_WROTE_THIS'" when nano died before running.
+c.send("grep -q NANO_WROTE_THIS /tmp/n.txt && echo NANO_VERIFY_OK", 4)
 open(sys.argv[1], "ab").write(c.buf)
 print(c.text()[-400:])
 PY
 
 echo
-# The banner proves the full build rather than --enable-tiny: tiny omits the
-# version string from the title bar.
-if ! grep -qa "NANO_WROTE_THIS" "$LOG"; then
+if grep -qa "Segmentation fault\|MPU fault" "$LOG"; then
+    die "nano crashed (screen: logs/nano-test.png)"
+fi
+# NANO_VERIFY_OK exists only if grep found the text inside the file on the
+# target. Asserting on the typed string itself passes on failure, because the
+# shell echoes it back when nano is not running to receive it.
+if ! grep -qa "NANO_VERIFY_OK" "$LOG"; then
     die "nano did not write the file (screen: logs/nano-test.png)"
 fi
 echo "PASS  Stage 1: nano draws, takes input, and writes the file"

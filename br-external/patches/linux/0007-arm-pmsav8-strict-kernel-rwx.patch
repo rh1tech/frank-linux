@@ -189,7 +189,7 @@ six of eight regions used, and the message is gone because it is no longer true.
  {
 --- a/arch/arm/mm/pmsa-v8.c
 +++ b/arch/arm/mm/pmsa-v8.c
-@@ -237,6 +237,107 @@
+@@ -237,6 +237,141 @@
  }
  #endif
  
@@ -201,13 +201,16 @@ six of eight regions used, and the message is gone because it is no longer true.
 + * None of this can be __init or use __initdata -- mark_rodata_ro() runs after
 + * free_initmem(), so anything in .init has already been given back.
 + */
-+static int pmsav8_free_region(void)
++/* First disabled region at or after `from`. Regions are claimed by programming
++ * them, which happens later with the MPU off, so callers asking for more than
++ * one have to step past the ones they have already picked. */
++static int pmsav8_free_region(unsigned int from)
 +{
 +	unsigned int max = (read_cpuid_mputype() & MPUIR_DREGION_SZMASK)
 +			   >> MPUIR_DREGION;
 +	unsigned int i;
 +
-+	for (i = 0; i < max && i < MPU_MAX_REGIONS; i++) {
++	for (i = from; i < max && i < MPU_MAX_REGIONS; i++) {
 +		prsel_write(i);
 +		isb();
 +		if (!(prlar_read() & PMSAv8_LAR_EN))
@@ -231,10 +234,11 @@ six of eight regions used, and the message is gone because it is no longer true.
 +{
 +	phys_addr_t ro_start = __pa(KERNEL_START);
 +	phys_addr_t ro_end = __pa(__init_begin);
++	phys_addr_t init_end = __pa(__init_end);
 +	phys_addr_t rw_end = __pa(KERNEL_END);
 +	void __iomem *scb = BASEADDR_V7M_SCB;
 +	unsigned long flags;
-+	int rw_rgn;
++	int rw_rgn, init_rgn;
 +	u32 ctrl;
 +
 +	/*
@@ -244,9 +248,31 @@ six of eight regions used, and the message is gone because it is no longer true.
 +	 * bss. Splitting at __end_rodata would leave those tables in the
 +	 * writable half for no gain.
 +	 */
-+	rw_rgn = pmsav8_free_region();
++	rw_rgn = pmsav8_free_region(0);
 +	if (rw_rgn < 0) {
 +		pr_warn("MPU: no free region, kernel text left writable\n");
++		return;
++	}
++
++	/*
++	 * A third region, for the __init sections that free_initmem() has just
++	 * handed back to the page allocator.
++	 *
++	 * They sit between the kernel's text and its data, inside the region
++	 * that denies user mode any access -- correct while they held init code,
++	 * and wrong the moment they became free pages. On NOMMU those pages go
++	 * straight into the same pool userspace allocates from, so a process
++	 * eventually receives memory it is not allowed to touch and dies on its
++	 * own heap. With a 1.6 MB initramfs that is 936 kB of unusable memory
++	 * and the very first process is the one that gets it:
++	 *
++	 *   Kernel panic - not syncing: Attempted to kill init! exitcode=0x0b
++	 *
++	 * which says SIGSEGV and nothing at all about the MPU.
++	 */
++	init_rgn = pmsav8_free_region(rw_rgn + 1);
++	if (init_rgn < 0) {
++		pr_warn("MPU: no free region for freed __init memory\n");
 +		return;
 +	}
 +
@@ -267,9 +293,15 @@ six of eight regions used, and the message is gone because it is no longer true.
 +	dsb();
 +	isb();
 +
++	/* freed __init memory: ordinary RAM again, reachable by user mode */
++	pmsav8_program(init_rgn,
++		       ro_end | PMSAv8_AP_PL1RW_PL0RW | PMSAv8_RGN_SHARED,
++		       ((init_end - 1) & ~(PMSAv8_MINALIGN - 1)) |
++				PMSAv8_LAR_IDX(PMSAv8_RGN_NORMAL) | PMSAv8_LAR_EN);
++
 +	/* data and bss: writable, never executable */
 +	pmsav8_program(rw_rgn,
-+		       ro_end | PMSAv8_AP_PL1RW_PL0NA | PMSAv8_RGN_SHARED |
++		       init_end | PMSAv8_AP_PL1RW_PL0NA | PMSAv8_RGN_SHARED |
 +				PMSAv8_BAR_XN,
 +		       ((rw_end - 1) & ~(PMSAv8_MINALIGN - 1)) |
 +				PMSAv8_LAR_IDX(PMSAv8_RGN_NORMAL) | PMSAv8_LAR_EN);
@@ -287,10 +319,12 @@ six of eight regions used, and the message is gone because it is no longer true.
 +
 +	local_irq_restore(flags);
 +
-+	mpu_rgn_info.used++;
++	mpu_rgn_info.used += 2;
 +
 +	pr_info("Kernel text %pa-%pa read-only, data %pa-%pa non-executable\n",
-+		&ro_start, &ro_end, &ro_end, &rw_end);
++		&ro_start, &ro_end, &init_end, &rw_end);
++	pr_info("Freed __init %pa-%pa returned to user-accessible memory\n",
++		&ro_end, &init_end);
 +}
 +#endif /* CONFIG_STRICT_KERNEL_RWX */
 +

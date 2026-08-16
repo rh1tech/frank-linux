@@ -25,5 +25,5 @@ export PATH=/usr/local/bin:/usr/local/sbin:$PATH
 export PS1='\w
 # '
 
-alias ll='ls -alF'
-alias la='ls -A'
+# No aliases: hush has no `alias` builtin, and sourcing this printed
+# "sh: can't execute 'alias': No such file or directory" on every login.

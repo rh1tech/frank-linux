@@ -152,7 +152,7 @@ it, and the system carries on.
  obj-$(CONFIG_ARM_PTDUMP_CORE)	+= dump.o
 --- /dev/null
 +++ b/arch/arm/mm/fault-v7m.c
-@@ -0,0 +1,79 @@
+@@ -0,0 +1,95 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * MemManage fault handling for ARMv7-M / ARMv8-M cores.
@@ -168,6 +168,7 @@ it, and the system carries on.
 + */
 +
 +#include <linux/kernel.h>
++#include <linux/ratelimit.h>
 +#include <linux/sched/signal.h>
 +#include <linux/signal.h>
 +#include <linux/io.h>
@@ -219,6 +220,21 @@ it, and the system carries on.
 +	if (!user_mode(regs))
 +		pr_alert("MPU fault in kernel mode: %s, MMFSR 0x%02x, addr 0x%08lx\n",
 +			 fault_reason(mmfsr), mmfsr, addr);
++	else
++		/*
++		 * Rate-limited, but not silent. A user-mode MPU fault is
++		 * normally the process's own bug and force_sig_fault() says so
++		 * through the signal -- but it is also how a mistake in the
++		 * region layout presents, and then the only evidence is a
++		 * SIGSEGV with nothing to connect it to the MPU. That cost an
++		 * afternoon once: 936 kB of freed __init memory left inside a
++		 * region denying user access, handed to the first process by
++		 * the page allocator, reported as
++		 * "Attempted to kill init! exitcode=0x0000000b".
++		 */
++		pr_info_ratelimited("%s[%d]: MPU fault, %s at 0x%08lx (MMFSR 0x%02x)\n",
++				    current->comm, task_pid_nr(current),
++				    fault_reason(mmfsr), addr, mmfsr);
 +
 +	/*
 +	 * user_mode: raise SIGSEGV against the current task and return; the
