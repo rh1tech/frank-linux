@@ -819,6 +819,89 @@ stall it, while block requests can still wait seconds for a busy card.
 
 Every one of these presented as silence somewhere unrelated to its cause.
 
+## F22. CONFIG_ARM_MPU: it works, and mainline cannot survive it
+
+```
+[    0.000000] Using ARM PMSAv8 Compliant MPU. Used 5 of 8 regions
+~ # mputest 0x111698d0
+MPUTEST own    0x11517dfc read 0xa5a5a5a5 OK
+MPUTEST kernel 0x111698d0 FAULTED sig=11
+MPUTEST RESULT protected
+~ #
+```
+
+On NOMMU without an MPU there is nothing at all between a user process and
+kernel memory. With PMSAv8 there is, and the shell prompt after the fault is the
+part that matters: the process died, the machine did not.
+
+### What the kernel actually programs
+
+`pmsav8_setup()` does not only map system RAM, which is what the defconfig
+comment here used to assume. It maps the whole 4 GB as execute-never device
+regions and subtracts RAM and the kernel from that, so nothing board-specific is
+needed. Read back over SWD while running:
+
+| rgn | range | AP | XN | what |
+|---|---|---|---|---|
+| 1 | `0x11008180-0x112cb000` | PL1 RW, **PL0 none** | no | the kernel |
+| 2 | `0x00000000-0x10ffffff` | PL0 RW | yes | flash XIP and low IO |
+| 3 | `0x11800000-0xffffffff` | PL0 RW | yes | SRAM (the console ring at `0x2007e000`) and peripherals |
+| 4 | `0x11000000-0x11008180` | PL0 RW | no | the DTB |
+| 5 | `0x112cb020-0x117fffe0` | PL0 RW | no | userspace |
+
+`MPU_TYPE = 0x00000800` (8 regions, unified) and `MPU_CTRL = 0x1`: enabled, and
+**PRIVDEFENA clear**, so there is no background region even for the kernel --
+every privileged access has to land in one of those five. The console ring and
+the block descriptor are covered by region 3 and keep working; both gates still
+pass with the MPU on.
+
+### The vector went nowhere
+
+`arch/arm/kernel/entry-v7m.S` pointed vector 4 (MemManage) at `__invalid_entry`,
+which prints a register dump and then executes `1: b 1b`. So the protection
+worked exactly once:
+
+```
+Unhandled exception: IPSR = 00000004 LR = fffffffd
+CPU: 0 UID: 0 PID: 34 Comm: mputest Not tainted 6.15.0
+PC is at 0x11488a44
+```
+
+and nothing further, ever. `IPSR = 4` is MemManage, `LR = fffffffd` says the
+fault came from user thread mode, and `r3`/`r6` hold the address that was read.
+The offending process was stopped, and so was everything else. Protection you
+cannot survive is not much better than none, and it makes the option unusable in
+practice: any userspace bug takes the system down.
+
+Patch 0006 routes the vector at a handler that reads MMFSR/MMFAR, acknowledges
+the sticky status bits and calls `arm_notify_die()` -- SIGSEGV for user mode,
+`die()` for kernel mode. Returning straight to the faulting instruction is not
+an option, because it would fault again forever; the exit is through
+`ret_to_user_from_irq`, which delivers the signal first.
+
+### Priority, again
+
+MemManage resets to priority 0, above everything. SVCall and PendSV are lowered
+to 0x80 by `proc-v7m.S`, and the return-to-user machinery is written for code
+running there -- PendSV is where it normally runs. A handler that can deliver a
+fatal signal and schedule must not do that from a higher-priority exception, or
+the switch happens with the exception still active. So MemManage is lowered to
+0x80 as well.
+
+The cost is that a MemManage taken while the kernel itself is at 0x80 cannot
+preempt and escalates to HardFault. That is the correct trade -- a kernel-mode
+MPU violation is a kernel bug and should stop the machine loudly, while a
+user-mode one has to be survivable -- and it is the same equal-priority rule
+that bit the bootloader from the other direction (F13): equal priority does not
+preempt.
+
+### An aside worth not misreading
+
+The boot log still says "This architecture does not have kernel memory
+protection." That is about `STRICT_KERNEL_RWX` -- read-only kernel text within
+kernel mode -- and is unrelated to what the MPU is doing here, which is keeping
+*user* mode out.
+
 ## F21. The capacity probe has to finish before Linux asks
 
 Deferring the link until handover (F18) introduced a race with the kernel. The

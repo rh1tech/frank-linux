@@ -72,8 +72,9 @@ the microSD is on that half too -- this one has no card slot at all.
 
 As far as we know this is the first Linux to run on this core. Console served by
 core 1 over USB CDC, FDPIC userspace with a shared libc, interrupt-masked
-atomics, 8 MB of PSRAM as system RAM, and the microSD the other
-RP2350 answers for, because the slave half has no storage of its own.
+atomics, 8 MB of PSRAM as system RAM, the microSD the other
+RP2350 answers for because the slave half has no storage of its own, and a
+PMSAv8 MPU that actually keeps userspace out of the kernel.
 
 `tools/check.sh` — the harness, validated against known-good firmware:
 

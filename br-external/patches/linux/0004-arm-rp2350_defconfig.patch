@@ -17,14 +17,15 @@ with four substantive changes:
                    RP2350's USB controller has no Linux driver, so core 1 serves
                    the console through an SRAM ring.
 
-  ARM_MPU is on. The M33 reports PMSAv8, unified, with 8 regions.
+  ARM_MPU is on. The M33 reports PMSAv8, unified, with 8 regions, and the
+                   kernel's own region layout needs no board-specific help.
 
 Networking is dropped wholesale: there is no interface on this half and the
 stack is pure overhead in 8 MB.
 
 --- /dev/null
 +++ b/arch/arm/configs/rp2350_defconfig
-@@ -0,0 +1,93 @@
+@@ -0,0 +1,106 @@
 +CONFIG_NO_HZ_IDLE=y
 +CONFIG_HIGH_RES_TIMERS=y
 +CONFIG_PREEMPT_VOLUNTARY=y
@@ -120,13 +121,14 @@ stack is pure overhead in 8 MB.
 +# TIMER0 as clocksource and clockevent; ARMV7M_SYSTICK gives only the former.
 +CONFIG_CLKSRC_RP2350=y
 +
-+# The MPU is off for first boot.
++# PMSAv8, unified, 8 regions (hw-findings F6).
 +#
-+# The hardware has a real one -- PMSAv8, unified, 8 regions (hw-findings F6) --
-+# but the kernel's region layout covers system RAM, and this board's console
-+# lives in SRAM at 0x2007e000, outside it. Bring the board up first and turn the
-+# MPU on as a separate, testable step.
-+# CONFIG_ARM_MPU is not set
++# pmsav8_setup() does not only map system RAM: it maps the whole 4 GB as
++# execute-never device regions and then subtracts RAM and the kernel from that,
++# so SRAM at 0x2007e000 -- where the console ring and the block descriptor live
++# -- and the peripherals are all covered without anything board-specific. Five
++# of the eight regions are used.
++CONFIG_ARM_MPU=y
 +
 +CONFIG_OF=y
 +CONFIG_USE_OF=y

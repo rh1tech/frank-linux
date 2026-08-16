@@ -209,3 +209,27 @@ clean-smoke:
 distclean: clean-smoke
 	docker volume rm $(DL_VOL) $(BR_VOL) $(EXT_VOL) 2>/dev/null || true
 	rm -rf build logs
+
+# Rebuild the kernel from scratch, re-applying the patches.
+#
+# Needed after editing anything in br-external/patches/linux/: patches are
+# applied once, at extract time, and stamped. A normal `make slave` reuses the
+# already-patched tree and the .config generated from it, so a changed defconfig
+# is silently ignored -- the build succeeds and produces the previous kernel.
+slave-kernel-rebuild: volumes
+	$(DOCKER_RUN) sh -c '$(BRSLAVE) linux-dirclean && $(BRSLAVE) -j$(JOBS) && \
+		mkdir -p /src/build/core2-slave && \
+		cp /out/core2-slave/images/* /src/build/core2-slave/'
+	@ls -l build/core2-slave/
+
+# --------------------------------------- kernel source access ---------------
+# The kernel tree lives inside the build volume, not in the repo. This copies a
+# file out of it so it can be read without a shell in the container.
+# linux-6.15, not linux-*: the glob also matches linux-headers-6.15 and cats
+# both copies, which silently doubles every file it is asked for.
+kernel-cat: volumes
+	@$(DOCKER_RUN) sh -c 'cat /out/core2-slave/build/linux-6.*/$(F)'
+
+# Search the kernel tree inside the build volume.
+kernel-grep: volumes
+	@$(DOCKER_RUN) sh -c 'grep -rn "$(P)" /out/core2-slave/build/linux-6.*/$(D) | head -20'

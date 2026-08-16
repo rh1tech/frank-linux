@@ -1,0 +1,234 @@
+arm: deliver a signal on an MPU fault instead of hanging
+
+CONFIG_ARM_MPU on an ARMv7-M/v8-M core programs the MPU so that user mode has
+no access to the kernel's region -- on NOMMU, the only thing between a stray
+user pointer and kernel memory. It works. The problem is what happens next:
+the MemManage vector points at __invalid_entry, which prints a register dump
+and then spins forever, so the first user-mode violation stops the machine.
+
+Measured on an RP2350 (Cortex-M33, PMSAv8, 8 regions), a user process reading
+a kernel address:
+
+  Unhandled exception: IPSR = 00000004 LR = fffffffd
+  CPU: 0 UID: 0 PID: 34 Comm: mputest Not tainted 6.15.0
+  PC is at 0x11488a44
+  ... and nothing further, ever.
+
+Protection you cannot survive is not much of an improvement on none, and it
+makes the option effectively unusable: any userspace bug takes the system down.
+
+So route vector 4 at a real handler. It reads MMFSR/MMFAR, acknowledges the
+sticky status bits, and calls arm_notify_die(), which raises SIGSEGV against
+the faulting task or die()s for a kernel-mode fault. Returning to the faulting
+instruction directly would just fault again, so the exit is through
+ret_to_user_from_irq, which delivers the signal first.
+
+MemManage priority is lowered from its reset value of 0 to 0x80, alongside
+SVCall and PendSV. The handler does not merely report: it can deliver a fatal
+signal and schedule, and that machinery is written for code running at those
+priorities -- switching tasks from a higher-priority handler would leave the
+exception active across the switch. The cost is that a MemManage taken while
+the kernel is running at 0x80 escalates to HardFault instead. That is the right
+trade: a kernel-mode MPU violation is a kernel bug and should stop the machine
+loudly, while a user-mode one has to be survivable.
+
+With this, mputest reading a kernel address gets a SIGSEGV, the shell reports
+it, and the system carries on.
+
+--- a/arch/arm/include/asm/v7m.h
++++ b/arch/arm/include/asm/v7m.h
+@@ -31,6 +31,9 @@
+ #define V7M_SCB_CCR_IC				(1 << 17)
+ #define V7M_SCB_CCR_BP				(1 << 18)
+ 
++#define V7M_SCB_SHPR1			0x18
++#define V7M_SCB_SHPR1_MEMFAULT_MASK		0x000000ff
++
+ #define V7M_SCB_SHPR2			0x1c
+ #define V7M_SCB_SHPR3			0x20
+ 
+@@ -39,6 +42,19 @@
+ #define V7M_SCB_SHCSR_BUSFAULTENA		(1 << 17)
+ #define V7M_SCB_SHCSR_MEMFAULTENA		(1 << 16)
+ 
++/* Configurable Fault Status Register; the low byte is the MemManage half. */
++#define V7M_SCB_CFSR			0x28
++#define V7M_SCB_CFSR_MMFSR_MASK			0x000000ff
++#define V7M_SCB_CFSR_IACCVIOL			(1 << 0)
++#define V7M_SCB_CFSR_DACCVIOL			(1 << 1)
++#define V7M_SCB_CFSR_MUNSTKERR			(1 << 3)
++#define V7M_SCB_CFSR_MSTKERR			(1 << 4)
++#define V7M_SCB_CFSR_MLSPERR			(1 << 5)
++#define V7M_SCB_CFSR_MMARVALID			(1 << 7)
++
++/* MemManage Fault Address Register; valid only when MMARVALID is set. */
++#define V7M_SCB_MMFAR			0x34
++
+ #define V7M_xPSR_FRAMEPTRALIGN			0x00000200
+ #define V7M_xPSR_EXCEPTIONNO			V7M_SCB_ICSR_VECTACTIVE
+ 
+--- a/arch/arm/mm/proc-v7m.S
++++ b/arch/arm/mm/proc-v7m.S
+@@ -125,6 +125,26 @@
+ 	mov	r5, #0x00800000
+ 	str	r5, [r0, V7M_SCB_SHPR3]	@ set PendSV priority
+ 
++	@ ... and of MemManage, to the same priority as those two.
++	@
++	@ It resets to 0, above everything else. That matters because the
++	@ handler does not merely report the fault: for a user-mode violation it
++	@ raises a signal and returns through ret_to_user_from_irq, which may
++	@ deliver a fatal signal and schedule. That machinery is written for
++	@ code running at SVCall/PendSV priority -- PendSV is where it normally
++	@ runs -- and switching tasks from a higher-priority handler would leave
++	@ the exception active across the switch.
++	@
++	@ The cost is that a MemManage taken while the kernel itself is running
++	@ at this priority cannot preempt, and escalates to HardFault instead.
++	@ That is the right trade: a kernel-mode MPU violation is a kernel bug
++	@ and should stop the machine loudly, while a user-mode one must be
++	@ survivable.
++	ldr	r5, [r0, V7M_SCB_SHPR1]
++	bic	r5, r5, #V7M_SCB_SHPR1_MEMFAULT_MASK
++	orr	r5, r5, #0x80
++	str	r5, [r0, V7M_SCB_SHPR1]
++
+ 	@ SVC to switch to handler mode. Notice that this requires sp to
+ 	@ point to writeable memory because the processor saves
+ 	@ some registers to the stack.
+--- a/arch/arm/kernel/entry-v7m.S
++++ b/arch/arm/kernel/entry-v7m.S
+@@ -85,6 +85,32 @@
+ 	bx	lr
+ ENDPROC(__irq_entry)
+ 
++/*
++ * MemManage: an MPU permission fault.
++ *
++ * Without this the vector points at __invalid_entry, which prints a register
++ * dump and then spins forever -- so with CONFIG_ARM_MPU on, the first stray
++ * pointer in any user process stops the whole machine. Protection you cannot
++ * survive is not much better than none.
++ *
++ * Returning straight to the faulting instruction is not an option either: it
++ * would fault again immediately and loop. The signal has to be delivered before
++ * we go back, which is what ret_to_user_from_irq does.
++ */
++__memmanage_entry:
++	v7m_exception_entry
++
++	mov	r0, sp			@ struct pt_regs *
++	bl	do_v7m_memmanage
++
++	@ A kernel-mode fault dies inside do_v7m_memmanage and never comes back,
++	@ so reaching here means the fault was in user mode and a signal is
++	@ pending for it.
++	get_thread_info tsk
++	mov	why, #0
++	b	ret_to_user_from_irq
++ENDPROC(__memmanage_entry)
++
+ __pendsv_entry:
+ 	v7m_exception_entry
+ 
+@@ -140,7 +166,7 @@
+ 	.long	__invalid_entry		@ 1 - Reset
+ 	.long	__invalid_entry		@ 2 - NMI
+ 	.long	__invalid_entry		@ 3 - HardFault
+-	.long	__invalid_entry		@ 4 - MemManage
++	.long	__memmanage_entry	@ 4 - MemManage
+ 	.long	__invalid_entry		@ 5 - BusFault
+ 	.long	__invalid_entry		@ 6 - UsageFault
+ 	.long	__invalid_entry		@ 7 - Reserved
+--- a/arch/arm/mm/Makefile
++++ b/arch/arm/mm/Makefile
+@@ -13,6 +13,7 @@
+ ifneq ($(CONFIG_MMU),y)
+ obj-y				+= nommu.o
+ obj-$(CONFIG_ARM_MPU)		+= pmsa-v7.o pmsa-v8.o
++obj-$(CONFIG_CPU_V7M)		+= fault-v7m.o
+ endif
+ 
+ obj-$(CONFIG_ARM_PTDUMP_CORE)	+= dump.o
+--- /dev/null
++++ b/arch/arm/mm/fault-v7m.c
+@@ -0,0 +1,79 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * MemManage fault handling for ARMv7-M / ARMv8-M cores.
++ *
++ * With CONFIG_ARM_MPU the MPU denies user mode any access to the kernel's own
++ * region, which on a NOMMU system is the only thing standing between a stray
++ * user pointer and kernel memory. The vector for that fault used to point at
++ * __invalid_entry, so the protection worked exactly once: the offending process
++ * was stopped, and so was everything else, in a spin loop.
++ *
++ * Turning it into a signal makes it behave the way every other architecture
++ * does -- the process dies, the machine carries on.
++ */
++
++#include <linux/kernel.h>
++#include <linux/sched/signal.h>
++#include <linux/signal.h>
++#include <linux/io.h>
++
++#include <asm/bug.h>
++#include <asm/ptrace.h>
++#include <asm/v7m.h>
++
++/* Called from __memmanage_entry in entry-v7m.S; declared here because there is
++ * no other C caller to declare it, and -Wmissing-prototypes is right to ask. */
++asmlinkage void do_v7m_memmanage(struct pt_regs *regs);
++
++static const char *fault_reason(u32 mmfsr)
++{
++	if (mmfsr & V7M_SCB_CFSR_IACCVIOL)
++		return "instruction fetch";
++	if (mmfsr & V7M_SCB_CFSR_DACCVIOL)
++		return "data access";
++	if (mmfsr & V7M_SCB_CFSR_MSTKERR)
++		return "exception stacking";
++	if (mmfsr & V7M_SCB_CFSR_MUNSTKERR)
++		return "exception unstacking";
++	if (mmfsr & V7M_SCB_CFSR_MLSPERR)
++		return "lazy FP stacking";
++	return "unknown";
++}
++
++asmlinkage void do_v7m_memmanage(struct pt_regs *regs)
++{
++	void __iomem *scb = BASEADDR_V7M_SCB;
++	u32 mmfsr = readl_relaxed(scb + V7M_SCB_CFSR) & V7M_SCB_CFSR_MMFSR_MASK;
++	unsigned long addr = 0;
++
++	/*
++	 * MMFAR only holds the faulting address for the address-related cases,
++	 * and MMARVALID says which those are. Reporting whatever happens to be
++	 * left in the register otherwise would be worse than reporting nothing.
++	 */
++	if (mmfsr & V7M_SCB_CFSR_MMARVALID)
++		addr = readl_relaxed(scb + V7M_SCB_MMFAR);
++
++	/*
++	 * Acknowledge before returning. These bits are write-one-to-clear and
++	 * sticky: leaving them set makes the next fault's status unreadable,
++	 * because it would be indistinguishable from this one.
++	 */
++	writel_relaxed(mmfsr, scb + V7M_SCB_CFSR);
++
++	if (!user_mode(regs))
++		pr_alert("MPU fault in kernel mode: %s, MMFSR 0x%02x, addr 0x%08lx\n",
++			 fault_reason(mmfsr), mmfsr, addr);
++
++	/*
++	 * user_mode: raise SIGSEGV against the current task and return; the
++	 * caller goes out through ret_to_user_from_irq, which delivers it.
++	 * kernel mode: die(), which does not return.
++	 *
++	 * SEGV_ACCERR rather than SEGV_MAPERR: on an MPU there is no such thing
++	 * as an unmapped address to fault on, only one the region table refuses
++	 * this privilege level.
++	 */
++	arm_notify_die("MPU fault", regs, SIGSEGV, SEGV_ACCERR,
++		       (void __user *)addr, mmfsr, 0);
++}
