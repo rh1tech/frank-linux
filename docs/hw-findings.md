@@ -819,6 +819,124 @@ stall it, while block requests can still wait seconds for a busy card.
 
 Every one of these presented as silence somewhere unrelated to its cause.
 
+## F29. Userspace threads livelock on F6, and that ends Midnight Commander
+
+Midnight Commander needs glib, glib needs threads, and Buildroot offers threads
+here without complaint: `BR2_PTHREADS_NATIVE` is `depends on BR2_USE_MMU ||
+((BR2_arm || BR2_armeb) && BR2_BINFMT_FDPIC)`, and ARM plus FDPIC is this board.
+It builds. glib2 builds. mc builds, 521 kB, with zero undefined fork references.
+
+Then the machine mounts its root, execs init, and stops dead:
+
+```
+[    0.584071] VFS: Mounted root (romfs filesystem) readonly on device 31:3.
+[    0.595277] Run /sbin/init as init process
+<nothing, and no response to input>
+```
+
+No panic, no MPU fault, no output. The same with `init=/bin/sh`, and the same
+with a twenty-line C program as init -- so it is not init, and it is not
+anything init does. It is the first process, every time.
+
+### Finding it
+
+Halting the core over SWD, three times, in three different programs:
+
+```
+pc  0x1058663a    lr  0x1058ac21    sp 0x11657930    psp 0x11657930
+```
+
+`psp == sp`, so user mode. `pc` is in the flash window, so userspace executing
+in place -- and because the rootfs *is* the flash image, that address is a byte
+offset into a file on the build host. `tools/romfs.py` resolves it, and the
+library's text loads at vaddr 0, so file offset is address:
+
+```
+0x1058663a -> /lib/libuClibc-1.0.52.so + 0x4d63a -> __lll_lock_wait + 0x34
+0x1058ac21 -> /lib/libuClibc-1.0.52.so + 0x51c21 -> __pthread_mutex_lock_internal + 0x51
+r4 = 0x1165bdf0 -> __malloc_heap_lock, in .bss, value 2
+```
+
+The call chain is `calloc` -> `__malloc_from_heap` -> mutex lock. Disassembling
+where the pc actually is:
+
+```
+4d63a:  ldrex r2, [r4]      <- pc
+4d63e:  cmp   r2, r3
+4d640:  bne.n 4d64a
+4d642:  strex r0, r7, [r4]
+4d646:  cmp   r0, #0
+4d648:  bne.n 4d63a         <- STREX failed; go round again
+...
+4d666:  svc   0             <- the futex wait, twelve instructions away,
+                               never reached
+```
+
+The process is not blocked on a syscall. It is **spinning**, in the
+compare-and-exchange retry loop, because `r4` points into PSRAM and **STREX
+never succeeds there**.
+
+That is F6, unchanged, four months later. F6 measured 0 successes in 1000
+attempts in PSRAM against 1000 in 1000 in SRAM, and predicted this exactly:
+
+> a kernel with its data in PSRAM would not crash, it would livelock inside the
+> first `cmpxchg` retry loop with no diagnostic at all
+
+It was right about the mechanism and wrong only about which half of the system
+would hit it. The kernel was given interrupt-masked atomics (patches 0001, 0002)
+and stopped caring. Userspace was never given anything, because until threads
+arrived it never took a lock.
+
+F6 also explains the lock word reading 2 rather than 0: "STREX to memory with no
+exclusive monitor is UNPREDICTABLE ... it may perform the store while reporting
+failure." The store lands, the status says it did not, the loop runs again.
+
+### Why there is no easy fix
+
+- **Userspace cannot mask interrupts.** The kernel's workaround is unavailable
+  to it by construction.
+- **The kernel-assisted compare-exchange is gone.** ARM Linux had
+  `__ARM_NR_cmpxchg` for CPUs without exclusives; 6.15's `arm_syscall()` offers
+  only breakpoint, cacheflush, usr26, usr32, set_tls and get_tls.
+- **`__kuser_cmpxchg` needs an MMU.** It lives in the vectors page, which NOMMU
+  does not have.
+- **Fixing libc would not be enough.** There are 696 exclusive pairs in
+  libuClibc alone, and every other package compiled for this target emits its
+  own: glib's `g_atomic_*` become inline LDREX/STREX too. Making userspace
+  atomics work means changing what the *compiler* emits -- building for an
+  architecture with no exclusives so gcc calls out to helpers, and implementing
+  those helpers against a syscall that would have to be added first.
+
+That is a real project with real uncertainty, and it is the price of threads on
+this board. Until it is paid: no NPTL, so no glib2, so no mc.
+
+### What survives
+
+The work is not wasted and is kept in the tree, because all of it is correct and
+none of it is what failed:
+
+| | |
+|---|---|
+| `buildroot-patches/0003` | glib2 and mc build without `BR2_USE_MMU` |
+| `br-external/patches/uclibc/0001` | `posix_spawn()` works on NOMMU instead of returning ENOSYS |
+| `br-external/patches/libglib2/0001` | glib builds and links with no `fork()` |
+| `br-external/patches/libffi/0001` | libffi builds on M-profile |
+| `br-external/patches/mc/0001,0002` | mc builds: posix_spawn, and the SAVERDIR triplet mismatch |
+
+The packages are switched off, not removed. If userspace ever gets atomics, mc
+is one defconfig line away.
+
+### The cheap part
+
+Nothing about this was visible from the console, and the obvious move was to
+bisect it -- rebuild without threads, rebuild without locale, forty minutes each.
+Four SWD register reads, one file-offset lookup and one disassembly answered it
+instead. That worked because execute-in-place makes a stuck process
+self-identifying: every user-mode `pc` is an offset into an image sitting on the
+build host. XIP was adopted to save RAM (F25); this is the second dividend.
+
+---
+
 ## F28. NPTL needs futexes, and the kernel had them switched off
 
 Turning on threads to get glib, and with it Midnight Commander, produced a

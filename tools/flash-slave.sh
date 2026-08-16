@@ -70,10 +70,24 @@ echo "==> flashing slave"
 ./tools/flash.sh slave "$BOOT" >/dev/null
 ./tools/flash.sh slave "build/payload/dtb.bin@$DTB_ADDR" >/dev/null
 ./tools/flash.sh slave "build/payload/kernel.bin@$KERNEL_ADDR" >/dev/null
+# The romfs is the slow part by a wide margin: 8.5 MB at the 1 MHz adapter speed
+# F20 forces on us is about seven minutes, against seconds for the kernel and
+# the DTB. When only the kernel has changed, writing it again is seven minutes
+# spent proving the flash still contains what it contained.
+#
+# SKIP_ROMFS=1 is deliberately a decision the caller makes rather than something
+# this script infers. It could compare a recorded hash, but the record would
+# describe what we last *wrote*, not what the board currently *holds*, and those
+# differ after any failed write -- which is exactly the situation where booting
+# a stale rootfs and believing it is the new one would waste the most time.
 if [ -f "$ROMFS" ]; then
-    ./tools/flash.sh slave "$ROMFS@$ROMFS_ADDR" >/dev/null
+    if [ -n "${SKIP_ROMFS:-}" ]; then
+        echo "    romfs: skipped (SKIP_ROMFS set) -- board keeps the image it has"
+    else
+        ./tools/flash.sh slave "$ROMFS@$ROMFS_ADDR" >/dev/null
+    fi
 fi
-echo "    bootloader + dtb + kernel${ROMFS:+ + romfs} written"
+echo "    bootloader + dtb + kernel${SKIP_ROMFS:+ (romfs skipped)} written"
 
 # Reset first, then attach.
 #

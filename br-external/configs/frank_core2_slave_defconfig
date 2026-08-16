@@ -33,7 +33,26 @@ BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_15=y
 # sound like they should be the hard part, and it is fork() that is impossible,
 # not threads. glib2 -- and so mc -- needs threads and would otherwise be out of
 # reach for a reason that does not actually apply.
-BR2_PTHREADS_NATIVE=y
+# No threads. This is a hardware limit, not a preference -- see F29.
+#
+# BR2_PTHREADS_NATIVE is offered here (`depends on BR2_USE_MMU || ((BR2_arm ||
+# BR2_armeb) && BR2_BINFMT_FDPIC)`) and it builds, and the result livelocks in
+# the first process before init prints anything. uClibc's mutexes compare-and-
+# exchange with LDREX/STREX, and on this chip STREX never succeeds outside SRAM
+# (F6), so the retry loop spins forever:
+#
+#   4d63a: ldrex r2, [r4]     <- pc sits here
+#   4d642: strex r0, r7, [r4]
+#   4d648: bne.n 4d63a        <- always taken
+#
+# The kernel works around this with interrupt-masked atomics (patches 0001 and
+# 0002). Userspace cannot mask interrupts, and 6.15 has removed the ARM
+# kernel-assisted cmpxchg syscall that existed for exactly this case.
+#
+# Without threads there is no glib2, and so no Midnight Commander. The patches
+# for both are kept -- they are correct and the packages build -- but the
+# packages stay off until userspace has working atomics.
+BR2_PTHREADS_NONE=y
 BR2_OPTIMIZE_S=y
 
 # Stripping is done by our own post-build script, not by BR2_STRIP_strip:
@@ -147,7 +166,7 @@ BR2_PACKAGE_NANO=y
 # It lands in flash rather than RAM, which is what makes it affordable at all --
 # mc plus glib is several MB, and on an 8 MB machine that is the whole budget if
 # it has to be resident. Executed in place it costs only its data.
-BR2_PACKAGE_MC=y
+# BR2_PACKAGE_MC is not set
 
 # TERM, PATH and the prompt. profile.d rather than replacing /etc/profile, so
 # Buildroot's skeleton keeps working.
