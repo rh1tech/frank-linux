@@ -24,6 +24,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "keyq.h"
 #include "term_compat.h"
 
 /* Bytes typed on the USB keyboard, on their way to Linux. Drained by the link

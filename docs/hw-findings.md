@@ -756,6 +756,110 @@ If no card answers, the RAM disk stands in and the console says
 `medium ramdisk (NO CARD)` rather than quietly serving 64 kB of pattern that
 looks like a working disk.
 
+## F18. Phase 6: a shell on HDMI, answering the keyboard
+
+```
+buildroot login: root
+~ # echo FRANK_KEYS_OK; uname -m
+FRANK_KEYS_OK
+armv7ml
+~ #
+```
+
+Decoded off the capture card at confidence 1.000, with the command typed in
+rather than printed. Every layer of the machine is in that loop: the terminal
+engine, the link, ttyFRK0, the shell, DispHSTX, and the font decode. `armv7ml`
+is the shell on the Cortex-M33 answering for itself.
+
+DispHSTX and Protea's VersaTerm-derived terminal went across unmodified -- the
+FRANK master's HDMI pin map is byte-identical to `DISPHSTX_DVI_PINOUT 2`. Only
+`term_compat.c` is new, and it is only the question of where the bytes come from
+and where keystrokes go. The terminal does not know it is talking to a kernel on
+another chip; Linux does not know its console is being drawn by a second
+processor.
+
+### The link is a byte pipe in both directions
+
+Console output rides the same doorbell/transaction machinery as the disk, as
+op 3. Nothing in the kernel changed for it: core 1 already drained ttyFRK0's ring
+to USB, and now a fan-out feeds both consumers, each at its own pace. The USB
+console stays live alongside HDMI, which is the same principle every phase has
+relied on -- there is always a channel that does not depend on the thing being
+debugged.
+
+Keystrokes go back inside the reply of the same transaction. The reply is a
+fixed size regardless of how many keys are waiting, because the receiver must
+arm for an exact byte count before the sender starts and the slave cannot know
+in advance what the master will have to say.
+
+### Four bugs, one shape
+
+**`link_tx_start()` sends `bytes / 4` words and drops the remainder in silence.**
+Every earlier caller used sector- and header-sized frames, so nothing noticed for
+five phases. The console is the first caller with an arbitrary length: a 37-byte
+write put 36 bytes on the wire while the receiver waited for 37, and the leftover
+shifted every transfer after it. The screen showed a boot log that started clean
+and decayed into fragments of itself. Console frames are padded now and the
+function asserts instead of truncating.
+
+**CR and LF configured as 0 does not mean "leave them alone", it means
+"discard".** The whole boot log arrived as one line.
+
+**The console fan-out must hold the ring when NOBODY is listening**, which is not
+the same as snapping both tails forward. Draining into a buffer no one reads
+throws the data away, and the data in question is the boot log -- F12 again,
+reintroduced by me and caught by the same blank screen.
+
+**A one-shot capacity probe made correctness depend on boot order.** The master
+needs 4.5 s to bring up display, keyboard and card; the slave asked once at 1 s,
+blocked five seconds waiting for a reply, and took the console with it. It
+retries now, with a 20 ms timeout on the doorbell rather than five seconds:
+console and capacity requests run on the core that services USB and must never
+stall it, while block requests can still wait seconds for a busy card.
+
+Every one of these presented as silence somewhere unrelated to its cause.
+
+## F19. What running a display does to the flashing harness
+
+The master half became much harder to flash once it drove HDMI, and the reason
+was in the harness rather than the firmware.
+
+`assert_half` identifies which half a probe is on before flashing, and to do
+that it has to let the ROM run long enough to latch `PACKAGE_SEL`. It did so by
+resetting, exiting openocd, and reading the register in a second session -- so
+the image on the flash ran for however long openocd took to relaunch, most of a
+second. That is ample for the master to start scanning out video, and DispHSTX's
+DMA keeps running afterwards: halting a core does not halt DMA. openocd then
+cannot place its flash algorithm in SRAM, which surfaces as
+
+```
+Error: Failed to write memory at 0x2001d6fc
+Error: Could not load data into target bounce buffer
+```
+
+The erase has already happened by then, so the chip is left with no valid image.
+It boots nothing, wedges, and every later step reports some other problem
+entirely -- which is how this cost an afternoon: the visible failures were
+always somewhere else.
+
+Reset, wait and halt now happen in one session with a 30 ms window, which is far
+more than the ROM needs and far less than any image needs to bring up a display.
+Writes are retried, which is safe precisely because nothing is accepted until
+`verify_image` agrees.
+
+Two smaller ones with the same moral. A wedged chip cannot be identified at all
+-- openocd reports `DP initialisation failed` and every read comes back empty --
+so identification has to rescue first and then still reset, because reading
+`PACKAGE_SEL` while the chip is held in rescue returns 0 for either package and
+passes for both halves. And an empty read used to kill the calling script
+through `set -e` with nothing printed, so a wedged board looked exactly like a
+script that stopped for no reason after `==> flashing slave`.
+
+**Do not poke registers speculatively to fix an intermittent problem.** Writing
+`DMA_CHAN_ABORT` to stop the scanout looked like the obvious fix and made things
+strictly worse: aborting a channel parked on a DREQ that never comes stalls the
+bus, and the next several failures were caused by the fix rather than the fault.
+
 ## F4. Master flash contents at project start
 
 Both halves arrived carrying an unrelated project's firmware (slave: a SID/6581

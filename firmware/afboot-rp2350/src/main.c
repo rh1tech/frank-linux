@@ -410,6 +410,15 @@ int main(void)
     ring_puthex32(RAM_DTB_ADDR);
     ring_puts(" -- starting Linux\r\n");
 
+    /*
+     * Open the link now that the flash copying is done.
+     *
+     * Core 1 leaves the link alone until this point. It shares the QMI with the
+     * 2.79 MB kernel copy above, and running both at once wedged core 0 past
+     * the point where SWD could even examine it.
+     */
+    frank_link_enable();
+
     /* Let core 1 push the last of that out before the kernel takes over and
      * starts writing to the same ring. */
     sleep_ms(50);

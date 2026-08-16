@@ -102,7 +102,24 @@ echo "==> flashing $ROLE <- $IMAGE${LOAD_ADDR:+ @ $LOAD_ADDR}"
 # flash -- undoing the rescue above and handing control back to the very image
 # that may be breaking XIP. Halting the already-rescued cores and writing from
 # there never lets a stale image run at all.
-LOG="$(oocd "$ROLE" "init" "halt" "$WRITE_CMD" "$VERIFY_CMD" "exit")" || true
+# Retried, because the write is verified.
+#
+# Flashing a half that was running a display occasionally fails part way through
+# with "Could not load data into target bounce buffer" -- openocd cannot place
+# its flash algorithm in SRAM. Left alone that is worse than a failed test: the
+# erase has already happened, so the chip is left with no valid image, boots
+# nothing, wedges, and every later step reports some unrelated problem.
+#
+# A retry is safe here in a way it would not be elsewhere: nothing is accepted
+# until verify_image confirms the flash matches the file, so a retry can turn a
+# failed attempt into a pass but can never turn a corrupt write into one.
+LOG=""
+for attempt in 1 2 3; do
+    LOG="$(oocd "$ROLE" "init" "halt" "$WRITE_CMD" "$VERIFY_CMD" "exit")" || true
+    grep -qE "Verified OK|verified [0-9]+ bytes" <<<"$LOG" && break
+    echo "    write attempt $attempt did not verify; rescuing and retrying" >&2
+    rescue "$ROLE"
+done
 
 # "verified N bytes" is the success line from verify_image; "Verified OK" is
 # `program`'s. Accept either, and read the transcript rather than the exit

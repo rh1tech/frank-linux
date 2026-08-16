@@ -196,4 +196,8 @@ static inline uint32_t frank_ring_get(frank_ring_t *r, uint8_t *dst,
 
 #endif /* !__KERNEL__ */
 
+/* Let core 1 start using the inter-chip link. Called by core 0 once it has
+ * finished with the flash; see core1_blk.c for why the link must wait. */
+void frank_link_enable(void);
+
 #endif /* FRANK_RING_H */

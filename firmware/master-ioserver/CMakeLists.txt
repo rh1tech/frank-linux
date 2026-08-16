@@ -14,6 +14,10 @@ set(PICO_BOARD_HEADER_DIRS ${HWTESTS_ROOT}/boards CACHE PATH "" FORCE)
 # half, and it needs the RP2350B's 48-GPIO window for the link's upper pins.
 set(PICO_BOARD "frank_core2_master" CACHE STRING "Pico board type" FORCE)
 
+# Bisecting switch: the USB HID host is the expensive part of this half (F3
+# measured 3x memory bandwidth, 20x link round-trip), so it can be built out.
+set(FRANK_MASTER_HID "1" CACHE STRING "Build the USB HID host in")
+
 set(CPU_SPEED   "252" CACHE STRING "CPU clock in MHz")
 set(PSRAM_SPEED "133" CACHE STRING "PSRAM max frequency in MHz")
 set(FLASH_SPEED "66"  CACHE STRING "Flash max frequency in MHz")
@@ -38,13 +42,17 @@ add_executable(master-ioserver
     term/framebuf.c
     term/terminal.c
     term/term_compat.c
+    term/input.c
+    term/term_input.c
+    usbhid/hid_app.c
+    usbhid/xinput_host.c
     sdcard/sdcard.c
     ${FW_ROOT}/common/link_bus.c
 )
 
 pico_generate_pio_header(master-ioserver ${FW_ROOT}/common/link_bus.pio)
 
-target_include_directories(master-ioserver PRIVATE src sdcard term ${FW_ROOT}/common)
+target_include_directories(master-ioserver PRIVATE src sdcard term usbhid ${FW_ROOT}/common)
 
 # DispHSTX reads its configuration from whatever is force-included ahead of its
 # own _config.h; there is no other way to override it.
@@ -58,6 +66,8 @@ target_compile_definitions(master-ioserver PRIVATE
     SDCARD_PIN_SPI0_MOSI=7
     SDCARD_PIN_SPI0_MISO=4
     SDCARD_PIN_SPI0_CS=5
+    USB_HID_ENABLED=1
+    FRANK_MASTER_HID=${FRANK_MASTER_HID}
     PSRAM_MAX_FREQ_MHZ=${PSRAM_SPEED}
     FLASH_MAX_FREQ_MHZ=${FLASH_SPEED}
 )
@@ -66,6 +76,8 @@ target_compile_options(master-ioserver PRIVATE -O2 -Wall -Wextra -Wno-unused-par
 
 target_link_libraries(master-ioserver
     DispHSTX
+    tinyusb_host
+    tinyusb_board
     pico_stdlib
     hardware_clocks
     hardware_dma

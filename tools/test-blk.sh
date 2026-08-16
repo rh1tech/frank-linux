@@ -34,7 +34,9 @@ SLAVE_TIMEOUT=1 ./tools/flash-slave.sh >/dev/null 2>&1 || true
 # The master must be serving before the slave's core 1 asks it for a capacity.
 echo "==> starting the master"
 oocd master "init" "reset run" "exit" >/dev/null 2>&1 || true
-sleep 3
+# It needs about 4.5 s to bring up display, keyboard and card before it can
+# answer. The slave retries regardless, so this is only to save the retries.
+sleep 6
 
 echo "==> booting the slave and testing the disk"
 : > "$LOG"

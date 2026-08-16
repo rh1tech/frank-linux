@@ -18,6 +18,21 @@ PATTERN = "/dev/cu.usbmodemFRANK*"
 
 
 def reset_slave():
+    """Start the slave, rescuing it first if it is wedged.
+
+    A wedged RP2350 survives an ordinary reset: openocd cannot even examine the
+    core ("Failed to read memory at 0xe000ed00") and `reset run` does nothing at
+    all, silently. Without this check a wedged board looks exactly like a kernel
+    that boots and prints nothing, which is a much more interesting-looking bug
+    than the truth.
+    """
+    probe = subprocess.run(
+        ["bash", "-c", 'source tools/probe.sh; oocd slave "init" "exit" 2>&1'],
+        check=False, capture_output=True, text=True)
+    if "Examination failed" in (probe.stdout + probe.stderr):
+        subprocess.run(["bash", "-c",
+                        'source tools/probe.sh; rescue slave >/dev/null 2>&1'],
+                       check=False)
     subprocess.run(["bash", "-c",
                     'source tools/probe.sh; oocd slave "init" "reset run" "exit" '
                     '>/dev/null 2>&1'], check=False)

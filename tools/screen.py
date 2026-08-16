@@ -215,6 +215,13 @@ def main() -> int:
     text, confidence = Decoder(font, cell_w, cell_h).decode(
         raw, cols, rows, x_off, y_off)
 
+    # A screen with nothing on it decodes as rows of spaces, which prints as a
+    # blank block and reads exactly like the tool having failed. Say which it
+    # is: a blank screen is a real result about the machine, not about ffmpeg.
+    if not any(line.strip() for line in text):
+        print("(screen is blank -- capture worked, there is nothing on it)",
+              file=sys.stderr)
+
     if not args.quiet:
         for line in text:
             print(line)

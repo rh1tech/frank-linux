@@ -44,8 +44,8 @@ See [docs/hw-findings.md](docs/hw-findings.md) F3.
 
 ## Status
 
-**Phase 5 complete. Linux runs on the RP2350's Cortex-M33, with storage served
-over the inter-chip link.**
+**Phase 6 complete. Linux runs on the RP2350's Cortex-M33, with an HDMI console,
+a USB keyboard and a microSD -- all served by the second RP2350 over the link.**
 
 ```
 ~ # cat /proc/cpuinfo
@@ -56,14 +56,19 @@ Hardware        : RP2350 (Device Tree Support)
 ```
 
 ```
+buildroot login: root
+~ # echo FRANK_KEYS_OK; uname -m
+FRANK_KEYS_OK
+armv7ml
 ~ # mount -o ro /dev/frankblk0p1 /mnt/sd
 ~ # ls /mnt/sd
 286  386  APPLE  C64  CMOS.ROM  DOOM  GENESIS  HERETIC
 KICKSTART  MSX  QUAKE  SNES  XT  ZX  cpc
 ```
 
-That is the microSD on the *other* RP2350, mounted over the link -- this half
-has no card slot.
+Read off the HDMI capture card, not off a serial log: the screen above is drawn
+by the other RP2350, the keystrokes went the other way down the same link, and
+the microSD is on that half too -- this one has no card slot at all.
 
 As far as we know this is the first Linux to run on this core. Console served by
 core 1 over USB CDC, FDPIC userspace with a shared libc, interrupt-masked

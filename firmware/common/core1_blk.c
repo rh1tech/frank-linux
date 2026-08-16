@@ -36,6 +36,28 @@
 static link_t blk_link;
 static bool blk_link_up;
 
+/*
+ * The link stays quiet until core 0 says the machine is Linux's.
+ *
+ * Everything the link does -- the console to the master's terminal, the disk --
+ * is for Linux. While afboot is still running it has no work to do, and doing
+ * it anyway is not free: afboot copies 2.79 MB from flash XIP into PSRAM XIP,
+ * and core 1 hammering the link through the same QMI at the same time wedged
+ * core 0 hard enough that SWD could no longer examine it. The copy never
+ * finished and the boot log stopped mid-sentence, every time.
+ *
+ * So core 0 opens the link when it is done with the flash, immediately before
+ * handing over. Nothing is lost: the console up to that point goes out over USB,
+ * which is the independent channel that does not depend on the link working.
+ */
+static volatile bool blk_link_enabled;
+
+void frank_link_enable(void)
+{
+    frank_ring_barrier();
+    blk_link_enabled = true;
+}
+
 /* Diagnostics for the one transaction that happens before Linux exists. Core 1
  * has no other way to say what went wrong, and "capacity 0" on the kernel side
  * is the same answer for every possible failure. */
@@ -128,10 +150,27 @@ static int32_t blk_transact(uint32_t op, uint32_t lba, uint32_t count,
     if (!blk_link_up)
         return -19;                                     /* -ENODEV */
 
+    /*
+     * How long to wait for the master to answer the doorbell.
+     *
+     * A block request can legitimately take a while -- the master may be part
+     * way through a card access -- so those wait seconds. Console and capacity
+     * requests must not: they run on the same core that services USB, and a
+     * five-second wait for a master that simply is not up yet freezes the
+     * console mid-line. That is exactly what it did. The master needs 4.5 s to
+     * initialise its display, keyboard and card; the slave asked at 1 s, blocked
+     * for five, and took the boot log with it.
+     *
+     * When the master is there it answers in about 141 us (F3), so 20 ms is
+     * generous and a missing master now costs 20 ms instead of five seconds.
+     */
+    uint32_t db_timeout = (op == LINK_BLK_OP_READ || op == LINK_BLK_OP_WRITE)
+                          ? 5000000u : 20000u;
+
     /* Raise our doorbell and wait for the master to acknowledge with its own.
      * The master polls DB_SM for exactly this. */
     link_db_set(&blk_link, true);
-    if (!link_db_wait(&blk_link, true, 5000000)) {
+    if (!link_db_wait(&blk_link, true, db_timeout)) {
         link_db_set(&blk_link, false);
         return -110;                                    /* -ETIMEDOUT */
     }
@@ -203,24 +242,32 @@ void frank_blk_init(void)
     s->blk.capacity = 0;
 }
 
-/* Ask the master how big the device is, once, after USB is serving. A capacity
- * of zero makes the kernel driver decline to register, which is better than
- * exposing a disk that cannot be read. */
-static void blk_probe_once(void)
+/*
+ * Ask the master how big the device is. Retried until it answers.
+ *
+ * A single attempt was wrong: the two halves are reset independently and the
+ * master takes about 4.5 s to bring up its display, keyboard and card, so a
+ * probe at one second finds nobody home. One shot meant that ordering decided
+ * whether the machine had a disk and a console at all, and it failed silently --
+ * capacity zero looks identical to no card.
+ *
+ * Retrying costs 20 ms per attempt while the master is absent and stops as soon
+ * as it answers, so neither half has to be started first.
+ */
+static void blk_probe(void)
 {
     frank_ring_shared_t *s = FRANK_RING_SHARED;
     uint32_t capacity = 0;
 
     blk_init_status = blk_transact(LINK_BLK_OP_INFO, 0, 0, NULL, &capacity);
     if (blk_init_status != 0)
-        capacity = 0;
+        return;
 
-    blk_report("blk: info status=", blk_init_status);
-    blk_report("blk: rx_remaining=", (int32_t)blk_rx_remaining);
     blk_report("blk: capacity=", (int32_t)capacity);
 
     frank_ring_barrier();
     s->blk.capacity = capacity;
+    blk_probe_done = true;
 }
 
 /*
@@ -274,17 +321,25 @@ static void console_pump(void)
 void frank_blk_service(void)
 {
     frank_ring_shared_t *s = FRANK_RING_SHARED;
-    static bool probed;
     static uint32_t warmup;
+    static uint32_t next_probe_us;
     uint32_t seq;
 
-    /* Let USB enumerate before spending seconds on the link. */
-    if (!probed) {
-        if (++warmup < 200000u)
+    /* Not until core 0 is finished with the flash and has handed over. */
+    if (!blk_link_enabled)
+        return;
+
+    /* Let USB enumerate before touching the link at all. */
+    if (++warmup < 200000u)
+        return;
+
+    /* Keep asking until the master answers, then never again. */
+    if (!blk_probe_done) {
+        uint32_t now = time_us_32();
+        if ((int32_t)(now - next_probe_us) < 0)
             return;
-        probed = true;
-        blk_probe_once();
-        blk_probe_done = true;
+        next_probe_us = now + 250000u;
+        blk_probe();
         return;
     }
 

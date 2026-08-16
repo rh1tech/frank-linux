@@ -20,9 +20,13 @@
  * needed no porting at all. What changed is only where the terminal's bytes
  * come from and go to (term/term_compat.c).
  *
- * The USB HID host is deliberately still off: F3 measured that enabling it
- * costs this half 3x its memory bandwidth and 20x its link round-trip, and
- * mixing that in before the display is proven would confuse slow with broken.
+ * The USB keyboard is on J8. Keystrokes go the other way down the same link:
+ * terminal engine -> term_compat's queue -> the next console transaction ->
+ * the slave's ring -> ttyFRK0 -> the shell. Linux sees an ordinary tty.
+ *
+ * F3 measured that running the HID host costs this half 3x its memory bandwidth
+ * and 20x its link round-trip, which is why it went in last, after the display
+ * and the disk were both known good.
  */
 
 #include <stdio.h>
@@ -38,8 +42,11 @@
 #include "display.h"
 #include "framebuf.h"
 #include "storage.h"
-#include "term_compat.h"
+#include "input.h"
+#include "keyq.h"
+#include "term_input.h"
 #include "terminal.h"
+#include "usbhid.h"
 
 #ifndef CPU_SPEED
 #define CPU_SPEED 252
@@ -113,6 +120,60 @@ static int32_t do_request(const link_blk_req_t *req)
     return 0;
 }
 
+/*
+ * Keyboard, from either of two places.
+ *
+ * The USB HID keyboard on J8 is the real one. The master's own UART console is
+ * the second, and it is not a debug afterthought: it is what lets the test
+ * harness type into the machine and read the answer off the HDMI capture,
+ * exercising the identical path a keystroke takes -- through the terminal
+ * engine, the link, and the tty -- without a finger on a key. The alternative
+ * was a separate self-test build, which would have proven a binary nobody ships.
+ */
+static void keyboard_tick(void)
+{
+#if FRANK_MASTER_HID
+    usbhid_task();
+#endif
+
+    input_event_t ev;
+    while (input_poll(&ev))
+        terminal_feed_event(&ev);
+
+    int c = getchar_timeout_us(0);
+    if (c != PICO_ERROR_TIMEOUT && c >= 0) {
+        input_event_t k = { .code = (c == '\r' || c == '\n') ? KEY_ENTER : c };
+        terminal_feed_event(&k);
+    }
+}
+
+/*
+ * Wait for the slave to drop its doorbell, but not forever.
+ *
+ * This used to be `while (link_db_get(&link));`, which is correct only while
+ * the slave is alive. Reset the slave mid-transaction and DB_SM goes high
+ * impedance -- the master reads it as still raised and spins there for good.
+ * The symptom was a machine that worked exactly once: the first Linux boot was
+ * fine, and every reset after it found a master that had stopped answering,
+ * with no message to say why because it was still, technically, running.
+ *
+ * The other half of the fix is that the display and keyboard keep being
+ * serviced while waiting, so a slave that goes away mid-transfer cannot freeze
+ * the screen either.
+ */
+static bool wait_db_clear(link_t *link, uint32_t timeout_us)
+{
+    absolute_time_t deadline = make_timeout_time_us(timeout_us);
+
+    while (link_db_get(link)) {
+        if (absolute_time_diff_us(get_absolute_time(), deadline) < 0)
+            return false;
+        display_tick();
+        keyboard_tick();
+    }
+    return true;
+}
+
 int main(void)
 {
     clocks_bringup();
@@ -132,6 +193,10 @@ int main(void)
 
     framebuf_init();
     terminal_init();
+    input_init();
+#if FRANK_MASTER_HID
+    usbhid_init();
+#endif
 
     for (int i = 0; i < 6; i++) {
         printf("master-ioserver - waiting for console (%d/6)\n", i + 1);
@@ -170,6 +235,7 @@ int main(void)
         if (!link_db_get(&link)) {
             static uint32_t spins;
             display_tick();
+            keyboard_tick();
             if (++spins % 20000000u == 0)
                 printf("RESULT ioserver idle db_in=%u served=%u errors=%u\n",
                        (unsigned)link_db_get(&link),
@@ -186,7 +252,7 @@ int main(void)
         if (link_rx_wait(&link, 1000000) != 0) {
             errors++;
             link_db_set(&link, false);
-            while (link_db_get(&link)) tight_loop_contents();
+            wait_db_clear(&link, 1000000);
             continue;
         }
 
@@ -250,8 +316,13 @@ int main(void)
             errors++;
 
         link_db_set(&link, false);
-        while (link_db_get(&link))
-            tight_loop_contents();
+        if (!wait_db_clear(&link, 1000000)) {
+            /* The slave stopped talking part way through -- almost always a
+             * reset on that side. Abandon this transaction and go back to
+             * polling; the next boot must find a master that still answers. */
+            link_rx_abort(&link);
+            errors++;
+        }
 
         if (status == 0) served++; else errors++;
         /* Console transactions run at 200 Hz; logging each one would drown the

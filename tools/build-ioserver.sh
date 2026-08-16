@@ -16,6 +16,7 @@ BLD="$REPO/build/ioserver"
 [ "${1:-}" = "--clean" ] && rm -rf "$BLD"
 
 : "${CPU_SPEED:=252}"
+: "${FRANK_MASTER_HID:=1}"
 : "${PSRAM_SPEED:=133}"
 : "${FLASH_SPEED:=66}"
 
@@ -30,6 +31,7 @@ echo "Pico SDK: $PICO_SDK_PATH"
 mkdir -p "$BLD"
 cmake -S "$SRC" -B "$BLD" -DPICO_PLATFORM=rp2350 \
       -DCPU_SPEED="$CPU_SPEED" -DPSRAM_SPEED="$PSRAM_SPEED" \
+      -DFRANK_MASTER_HID="$FRANK_MASTER_HID" \
       -DFLASH_SPEED="$FLASH_SPEED" >/dev/null
 cmake --build "$BLD" -j"$(sysctl -n hw.ncpu 2>/dev/null || echo 4)" 2>&1 \
     | grep -vE "^\[|^gmake" || true

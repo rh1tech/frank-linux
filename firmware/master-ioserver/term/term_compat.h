@@ -114,8 +114,7 @@ void term_compat_set_mods(bool shift, bool ctrl, bool alt);
 /* No-op here; kept so the engine's call site still compiles. */
 void serial_apply_settings(void);
 
-/* Take up to `max` queued keystrokes for the next link transaction. Returns
- * how many were written. */
-uint32_t term_compat_take_keys(uint8_t *dst, uint32_t max);
+/* term_compat_take_keys() lives in keyq.h: this header's KEY_* macros collide
+ * with input.h's KEY_* enum, so callers that need both cannot include this. */
 
 #endif // TERM_COMPAT_H
