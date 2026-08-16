@@ -53,6 +53,9 @@
 static uint8_t ramdisk[RAMDISK_SECTORS * LINK_BLK_SECTOR];
 
 static uint8_t xfer[LINK_BLK_MAX_SECTORS * LINK_BLK_SECTOR] __attribute__((aligned(4)));
+static uint8_t reply[sizeof(link_blk_rsp_t)
+                     + LINK_BLK_MAX_SECTORS * LINK_BLK_SECTOR]
+              __attribute__((aligned(4)));
 
 static uint32_t __no_inline_not_in_flash_func(flash_set_clkdiv)(uint32_t clock_hz)
 {
@@ -145,10 +148,17 @@ int main(void)
          * firmware never used: there, the master always went first. Storage is
          * driven by Linux, so the slave has to be able to start a transaction.
          */
+        /* Heartbeat while idle, so "waiting for a doorbell that never comes"
+         * is distinguishable from "wedged" without a debugger. */
         if (!link_db_get(&link)) {
-            tight_loop_contents();
+            static uint32_t spins;
+            if (++spins % 20000000u == 0)
+                printf("RESULT ioserver idle db_in=%u served=%u errors=%u\n",
+                       (unsigned)link_db_get(&link),
+                       (unsigned)served, (unsigned)errors);
             continue;
         }
+        printf("RESULT ioserver doorbell seen\n");
 
         link_blk_req_t req;
         link_rx_arm(&link, &req, sizeof(req));
@@ -173,23 +183,25 @@ int main(void)
                 memcpy(ramdisk + req.lba * LINK_BLK_SECTOR, xfer, bytes);
         }
 
+        /* Status and any read data as one transfer, so the slave arms once and
+         * there is no window between two sends for it to miss. */
         link_blk_rsp_t rsp = { .status = status, .capacity = RAMDISK_SECTORS };
-        link_tx_start(&link, &rsp, sizeof(rsp));
-        link_tx_finish(&link, 1000000);
+        memcpy(reply, &rsp, sizeof(rsp));
+        if (status == 0 && req.op == LINK_BLK_OP_READ)
+            memcpy(reply + sizeof(rsp), ramdisk + req.lba * LINK_BLK_SECTOR, bytes);
 
-        if (status == 0 && req.op == LINK_BLK_OP_READ) {
-            memcpy(xfer, ramdisk + req.lba * LINK_BLK_SECTOR, bytes);
-            link_tx_start(&link, xfer, bytes);
-            if (!link_tx_finish(&link, 2000000))
-                errors++;
-        }
+        uint32_t reply_bytes = sizeof(rsp)
+                             + ((status == 0 && req.op == LINK_BLK_OP_READ) ? bytes : 0);
+        link_tx_start(&link, reply, reply_bytes);
+        if (!link_tx_finish(&link, 2000000))
+            errors++;
 
         link_db_set(&link, false);
         while (link_db_get(&link))
             tight_loop_contents();
 
         if (status == 0) served++; else errors++;
-        if ((served + errors) % 32u == 0)
+        if (true)
             printf("RESULT ioserver served=%u errors=%u\n",
                    (unsigned)served, (unsigned)errors);
     }

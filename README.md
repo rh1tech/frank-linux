@@ -44,7 +44,8 @@ See [docs/hw-findings.md](docs/hw-findings.md) F3.
 
 ## Status
 
-**Phase 4 complete. Linux runs on the RP2350's Cortex-M33.**
+**Phase 5 complete. Linux runs on the RP2350's Cortex-M33, with storage served
+over the inter-chip link.**
 
 ```
 ~ # cat /proc/cpuinfo
@@ -54,9 +55,18 @@ Hardware        : RP2350 (Device Tree Support)
  16:       2808 nvic_irq   0 Edge      rp2350-timer0
 ```
 
+```
+~ # ls -l /dev/frankblk0
+brw-------  1 root root  254, 0  /dev/frankblk0
+~ # dd if=/tmp/w of=/dev/frankblk0 bs=512 seek=10 && \
+    dd if=/dev/frankblk0 bs=512 count=1 skip=10 | head -1
+test-write
+```
+
 As far as we know this is the first Linux to run on this core. Console served by
 core 1 over USB CDC, FDPIC userspace with a shared libc, interrupt-masked
-atomics, 8 MB of PSRAM as system RAM.
+atomics, 8 MB of PSRAM as system RAM, and a block device the other RP2350
+answers for -- because the slave half has no storage of its own.
 
 `tools/check.sh` — the harness, validated against known-good firmware:
 

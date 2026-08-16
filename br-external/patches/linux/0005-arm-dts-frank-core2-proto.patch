@@ -33,7 +33,7 @@ core 1 stack.
 +dtb-$(CONFIG_ARCH_RP2350) += frank-core2-proto-slave.dtb
 --- /dev/null
 +++ b/arch/arm/boot/dts/frank/rp2350.dtsi
-@@ -0,0 +1,74 @@
+@@ -0,0 +1,84 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Raspberry Pi RP2350, Arm side.
@@ -111,6 +111,7 @@ core 1 stack.
 +			compatible = "frank,link-block";
 +			reg = <0x2007e000 0x2000>;
 +		};
++
 +		console: ring-console@2007e000 {
 +			compatible = "frank,ring-console";
 +			reg = <0x2007e000 0x2000>;

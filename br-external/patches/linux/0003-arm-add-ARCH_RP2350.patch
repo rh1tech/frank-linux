@@ -739,7 +739,7 @@ Linux driver, so core 1 runs a TinyUSB CDC device and moves bytes through two
 +MODULE_LICENSE("GPL");
 --- /dev/null
 +++ b/arch/arm/mach-rp2350/frank-blk.c
-@@ -0,0 +1,277 @@
+@@ -0,0 +1,292 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Block device served by core 1 over the inter-chip link.
@@ -811,6 +811,7 @@ Linux driver, so core 1 runs a TinyUSB CDC device and moves bytes through two
 +};
 +
 +static struct frank_blk *frank_blk;
++static int frank_blk_major;
 +
 +static int frank_blk_submit(struct frank_blk *fb, u32 op, sector_t lba,
 +			    u32 count, void *buf)
@@ -947,6 +948,18 @@ Linux driver, so core 1 runs a TinyUSB CDC device and moves bytes through two
 +	mutex_init(&fb->lock);
 +	fb->capacity = capacity;
 +
++	/*
++	 * A major has to be allocated before add_disk(), not left at zero.
++	 * Without this add_disk() fails with -EINVAL and a backtrace, having
++	 * done everything else correctly -- the queue, the tag set and the
++	 * capacity were all fine.
++	 */
++	frank_blk_major = register_blkdev(0, "frankblk");
++	if (frank_blk_major < 0) {
++		dev_err(&pdev->dev, "no block major available\n");
++		return frank_blk_major;
++	}
++
 +	fb->tag_set.ops = &frank_blk_mq_ops;
 +	fb->tag_set.nr_hw_queues = 1;
 +	fb->tag_set.queue_depth = 4;
@@ -964,7 +977,7 @@ Linux driver, so core 1 runs a TinyUSB CDC device and moves bytes through two
 +		goto out_tagset;
 +	}
 +
-+	fb->disk->major = 0;
++	fb->disk->major = frank_blk_major;
 +	fb->disk->first_minor = 0;
 +	fb->disk->minors = 8;
 +	fb->disk->fops = &frank_blk_fops;
@@ -986,6 +999,7 @@ Linux driver, so core 1 runs a TinyUSB CDC device and moves bytes through two
 +	put_disk(fb->disk);
 +out_tagset:
 +	blk_mq_free_tag_set(&fb->tag_set);
++	unregister_blkdev(frank_blk_major, "frankblk");
 +	return ret;
 +}
 +
@@ -996,6 +1010,7 @@ Linux driver, so core 1 runs a TinyUSB CDC device and moves bytes through two
 +	del_gendisk(fb->disk);
 +	put_disk(fb->disk);
 +	blk_mq_free_tag_set(&fb->tag_set);
++	unregister_blkdev(frank_blk_major, "frankblk");
 +}
 +
 +static const struct of_device_id frank_blk_of_match[] = {

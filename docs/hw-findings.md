@@ -675,6 +675,54 @@ waiting for a doorbell nobody would ring, printing nothing, with the UART never
 even configured (`GPIO0 FUNCSEL = 0x1f`, NULL). A missing define looks exactly
 like dead hardware.
 
+## F16. Phase 5: a block device on the slave, served by the master over the link
+
+```
+~ # ls -l /dev/frankblk0
+brw-------    1 root     root      254,   0 /dev/frankblk0
+~ # cat /sys/block/frankblk0/size
+128
+~ # dd if=/dev/frankblk0 of=/dev/null bs=512 count=64
+64+0 records out
+~ # echo test-write > /tmp/w; dd if=/tmp/w of=/dev/frankblk0 bs=512 seek=10
+~ # dd if=/dev/frankblk0 bs=512 count=1 skip=10 | head -1
+test-write
+```
+
+Reads and writes both complete, and a write read back through the entire path:
+Linux -> descriptor in SRAM -> core 1 -> the link -> the master -> the medium
+-> back. The medium is a RAM disk on the master for now; the microSD driver
+replaces it without the protocol changing.
+
+### Three bugs, and each one taught the same lesson from a different angle
+
+**The receiver must be armed before the sender starts.** `link_bus.h` says so
+plainly -- `link_rx_arm()` restarts the state machine and resets the input shift
+counter, which is what keeps 32-bit autopush words aligned. The slave armed
+*after* sending its request, which is the natural way to write it, and lost
+every reply. The master's own log said `doorbell seen` and `served=1 errors=0`:
+it received the request and answered correctly into a receiver that did not yet
+exist. Fixed by arming first, and by sending the status header and any read data
+as a single transfer so there is no second window to miss.
+
+**`add_disk()` needs a major.** Leaving `disk->major = 0` fails with `-EINVAL`
+after the queue, tag set and capacity are all correct, so the failure points
+nowhere near the cause. `register_blkdev(0, ...)` first.
+
+**Nothing slow may run before the service loop.** `frank_blk_init()` probed the
+master for its capacity before core 1 entered its loop, so `tud_task()` was not
+being called -- and a link transaction that finds the master absent blocks for
+eight seconds. USB could not enumerate, the host gave up, and the console never
+appeared: `core1_alive` stuck at 0 with no CDC device at all. The probe now
+happens inside the service loop once USB is up, which afboot's wait for a
+terminal leaves ample time for.
+
+The common thread is that every one of these presented as silence somewhere
+unrelated to the cause -- a lost reply, a device that would not enumerate, a
+probe failure with a clean backtrace. Reading state directly out of the hardware
+(the ring indices, `core1_alive`, the kernel's own `__log_buf` over SWD) found
+each of them; guessing did not.
+
 ## F4. Master flash contents at project start
 
 Both halves arrived carrying an unrelated project's firmware (slave: a SID/6581
