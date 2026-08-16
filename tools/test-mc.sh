@@ -120,11 +120,14 @@ echo
 if grep -qa "Segmentation fault\|MPU fault\|not implemented\|Function not impl" "$LOG"; then
     die "mc crashed or hit a missing syscall (screens: logs/mc-*.png)"
 fi
-# The panel frame. mc draws its border with ACS line-drawing characters, which
-# arrive as the decoder's block glyph, and the directory name is in the frame's
-# title -- neither of which a shell error message can produce.
+# The panel frame. mc puts the directory in the frame's title and the files
+# inside it, and both have to be there: the title alone would also appear if mc
+# printed an error mentioning the path it could not open.
 if ! grep -qa "/tmp/mct" "$LOG"; then
     die "mc did not draw its panels (screen: logs/mc-panels.png)"
+fi
+if ! grep -qa "f.txt" "$LOG"; then
+    die "mc drew a panel but did not list the directory (screen: logs/mc-panels.png)"
 fi
 # The viewer, which is the assertion that mc did real work rather than merely
 # starting. The sentinel is inside the file, so it can only be on the screen if

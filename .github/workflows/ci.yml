@@ -81,6 +81,12 @@ jobs:
         # at 1:1 and 2x, for two fonts of different geometry.
         run: python3 tools/test_screen.py
 
+      - name: romfs parser
+        # Builds romfs images byte by byte and requires the parser to walk them,
+        # including the page-alignment check that decides whether the board
+        # executes its userspace from flash or copies it into RAM.
+        run: python3 tools/test_romfs.py
+
       - name: Shell syntax
         run: |
           for f in tools/*.sh .githooks/*; do
