@@ -40,18 +40,44 @@ uint8_t const *tud_descriptor_device_cb(void)
     return (uint8_t const *)&desc_device;
 }
 
-enum { ITF_NUM_CDC = 0, ITF_NUM_CDC_DATA, ITF_NUM_TOTAL };
+enum { ITF_NUM_CDC = 0, ITF_NUM_CDC_DATA, ITF_NUM_RESET, ITF_NUM_TOTAL };
+
+/*
+ * A vendor interface picotool recognises, so the board can be put into the ROM
+ * bootloader over USB from any state.
+ *
+ * Without it the only way in is holding BOOTSEL while powering on -- a physical
+ * act -- and that matters here because it is also the only recovery from a
+ * debug port that has stopped answering, which on this board is a thing that
+ * happens. `picotool reboot -f` then works whether Linux is running, wedged, or
+ * the SWD link is dead, and picotool can write flash without SWD at all.
+ *
+ * Class/subclass/protocol are what picotool looks for; they come from the
+ * pico-sdk's stdio_usb reset interface.
+ */
+#define RESET_INTERFACE_SUBCLASS    0x00
+#define RESET_INTERFACE_PROTOCOL    0x01
+#define RESET_REQUEST_BOOTSEL       0x01
+
+/* A bare interface descriptor with no endpoints: picotool drives it entirely
+ * with control transfers, so TUD_VENDOR_DESCRIPTOR (which insists on a bulk
+ * pair) is the wrong shape and would waste two endpoints. */
+#define TUD_RPI_RESET_DESC_LEN  9
+#define TUD_RPI_RESET_DESCRIPTOR(_itfnum, _stridx) \
+    9, TUSB_DESC_INTERFACE, _itfnum, 0, 0, TUSB_CLASS_VENDOR_SPECIFIC, \
+    RESET_INTERFACE_SUBCLASS, RESET_INTERFACE_PROTOCOL, _stridx
 
 #define EPNUM_CDC_NOTIF   0x81
 #define EPNUM_CDC_OUT     0x02
 #define EPNUM_CDC_IN      0x82
 
-#define CONFIG_TOTAL_LEN  (TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN)
+#define CONFIG_TOTAL_LEN  (TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN + TUD_RPI_RESET_DESC_LEN)
 
 static const uint8_t desc_configuration[] = {
     TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN, 0x00, 100),
     TUD_CDC_DESCRIPTOR(ITF_NUM_CDC, 4, EPNUM_CDC_NOTIF, 8,
                        EPNUM_CDC_OUT, EPNUM_CDC_IN, 64),
+    TUD_RPI_RESET_DESCRIPTOR(ITF_NUM_RESET, 0),
 };
 
 uint8_t const *tud_descriptor_configuration_cb(uint8_t index)

@@ -22,6 +22,12 @@ set -euo pipefail
 
 ROLE="${1:-slave}"
 
+# The role is used in messages only, and deliberately: picotool addresses the
+# one device that offers the interface, and today that is the slave's afboot.
+# If the master ever carries it too, this has to start passing --bus/--address
+# from tools/devices.py, because "the only compatible device" stops being an
+# identity the moment there are two.
+
 command -v picotool >/dev/null || { echo "picotool not found" >&2; exit 1; }
 
 # A glob rather than `ls | grep`: the mount point is a fixed name and this is

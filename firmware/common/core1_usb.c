@@ -20,8 +20,11 @@
 
 #include "pico/multicore.h"
 #include "pico/time.h"
+#include "pico/bootrom.h"
 #include "pico/stdlib.h"
 #include "tusb.h"
+/* usbd_class_driver_t and usbd_app_driver_get_cb() live here, not in tusb.h. */
+#include "device/usbd_pvt.h"
 
 #include "frank_ring.h"
 
@@ -240,6 +243,88 @@ void frank_ring_puts(const char *str)
     uint32_t len = 0;
     while (p[len]) len++;
     frank_ring_put(&FRANK_RING_SHARED->tx, p, len);
+}
+
+/*
+ * The reset interface picotool talks to.
+ *
+ * A class driver, not just a control callback: TinyUSB opens every interface in
+ * the configuration descriptor with a driver, and an interface no driver claims
+ * makes SET_CONFIGURATION fail -- the device then never enumerates at all. That
+ * is a bad way to find out, because the console it takes down is the one you
+ * would have used to debug it.
+ *
+ * The point of all this is that the board can be put into the ROM bootloader
+ * over its own USB, from any state, without SWD and without somebody holding a
+ * button -- which is also the only recovery from a debug port that has stopped
+ * answering, and this board's does.
+ */
+#define RESET_INTERFACE_SUBCLASS  0x00
+#define RESET_INTERFACE_PROTOCOL  0x01
+#define RESET_REQUEST_BOOTSEL     0x01
+
+static uint8_t reset_itf_num;
+
+static void resetd_init(void) { }
+
+static void resetd_reset(uint8_t rhport)
+{
+    (void)rhport;
+    reset_itf_num = 0;
+}
+
+static uint16_t resetd_open(uint8_t rhport, tusb_desc_interface_t const *itf,
+                            uint16_t max_len)
+{
+    (void)rhport;
+
+    TU_VERIFY(itf->bInterfaceClass == TUSB_CLASS_VENDOR_SPECIFIC &&
+              itf->bInterfaceSubClass == RESET_INTERFACE_SUBCLASS &&
+              itf->bInterfaceProtocol == RESET_INTERFACE_PROTOCOL, 0);
+    TU_VERIFY(max_len >= sizeof(tusb_desc_interface_t), 0);
+
+    reset_itf_num = itf->bInterfaceNumber;
+    return sizeof(tusb_desc_interface_t);
+}
+
+static bool resetd_control_xfer_cb(uint8_t rhport, uint8_t stage,
+                                   tusb_control_request_t const *request)
+{
+    if (stage != CONTROL_STAGE_SETUP)
+        return true;
+    if (request->wIndex != reset_itf_num)
+        return false;
+
+    if (request->bRequest == RESET_REQUEST_BOOTSEL) {
+        tud_control_status(rhport, request);
+        reset_usb_boot(0, 0);           /* does not return */
+    }
+    return false;
+}
+
+static bool resetd_xfer_cb(uint8_t rhport, uint8_t ep_addr,
+                           xfer_result_t result, uint32_t xferred_bytes)
+{
+    (void)rhport; (void)ep_addr; (void)result; (void)xferred_bytes;
+    return true;                        /* no endpoints; control transfers only */
+}
+
+static const usbd_class_driver_t reset_driver = {
+#if CFG_TUSB_DEBUG >= 2
+    .name             = "RESET",
+#endif
+    .init             = resetd_init,
+    .reset            = resetd_reset,
+    .open             = resetd_open,
+    .control_xfer_cb  = resetd_control_xfer_cb,
+    .xfer_cb          = resetd_xfer_cb,
+    .sof              = NULL,
+};
+
+const usbd_class_driver_t *usbd_app_driver_get_cb(uint8_t *driver_count)
+{
+    *driver_count = 1;
+    return &reset_driver;
 }
 
 bool frank_console_ready(void)
