@@ -28,9 +28,6 @@ LOG=logs/blk-test.log
 echo "==> flashing the master I/O server"
 ./tools/flash.sh master "$IOSERVER" >/dev/null
 
-echo "==> flashing the slave (bootloader + kernel + dtb)"
-SLAVE_TIMEOUT=1 ./tools/flash-slave.sh >/dev/null 2>&1 || true
-
 # The master must be serving before the slave's core 1 asks it for a capacity.
 echo "==> starting the master"
 oocd master "init" "reset run" "exit" >/dev/null 2>&1 || true
@@ -38,17 +35,25 @@ oocd master "init" "reset run" "exit" >/dev/null 2>&1 || true
 # answer. The slave retries regardless, so this is only to save the retries.
 sleep 6
 
-echo "==> booting the slave and testing the disk"
-: > "$LOG"
+# Flashing leaves the slave running, so Linux is started by the flash rather
+# than by a warm reset afterwards. A warm `reset run` on a slave whose core 1 is
+# mid-transaction has repeatedly left the chip in a state where openocd cannot
+# examine it at all, and which survives further resets.
+echo "==> flashing the slave and booting Linux"
+SLAVE_TIMEOUT=45 ./tools/flash-slave.sh || die "the slave did not boot Linux"
+
+echo "==> testing the disk"
+# The driver's registration line is in the boot log, because Linux was already
+# running by the time this attaches; the mount is in the session below. Both
+# halves of the evidence are needed, so the assertions run over the two joined.
+cp logs/slave-boot.log "$LOG"
 python3 - "$LOG" <<'PY'
 import sys
 sys.path.insert(0, "tools")
-from slave_console import Console, reset_slave
+from slave_console import Console
 
 log = sys.argv[1]
-reset_slave()
-c = Console()
-c.drain(38)
+c = Console(settle=1.0)
 c.send("", 2)
 c.send("root", 3)
 c.send("cat /sys/block/frankblk0/size")
@@ -57,7 +62,7 @@ c.send("mkdir -p /mnt/sd; mount -o ro /dev/frankblk0p1 /mnt/sd 2>&1", 8)
 c.send("ls /mnt/sd | head -20", 6)
 c.send("umount /mnt/sd; echo BLKTEST_DONE", 4)
 
-open(log, "wb").write(c.buf)
+open(log, "ab").write(c.buf)
 print(c.text()[-2500:])
 PY
 

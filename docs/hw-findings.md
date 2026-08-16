@@ -819,6 +819,26 @@ stall it, while block requests can still wait seconds for a busy card.
 
 Every one of these presented as silence somewhere unrelated to its cause.
 
+## F21. The capacity probe has to finish before Linux asks
+
+Deferring the link until handover (F18) introduced a race with the kernel. The
+block driver reads the capacity exactly **once**, about 0.26 s after handover,
+and declines to register permanently if it is still zero. Core 1 retries the
+probe every 250 ms, so the two raced and the machine came up with no disk:
+
+```
+frank-blk 2007e000.link-block: no storage offered by the master; not registering
+```
+
+which reads like a missing card rather than a timing bug. afboot now waits (up
+to a second) for a non-zero capacity before entering the kernel, and says what
+it got. The wait only costs anything when the master is genuinely absent, in
+which case there is no disk to miss.
+
+Worth noting as a pattern: both this and the one-shot probe in F18 are the same
+mistake in different places -- a value read once, at a moment nobody chose, from
+a peer that comes up on its own schedule.
+
 ## F20. The real cause: SWD at 5 MHz stops working once HDMI runs
 
 Everything in F19 -- the failed flash writes, the wedged master, the

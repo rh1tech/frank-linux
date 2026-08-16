@@ -419,6 +419,25 @@ int main(void)
      */
     frank_link_enable();
 
+    /*
+     * Wait for the master to say how big the disk is, before Linux asks.
+     *
+     * The kernel's driver reads the capacity exactly once, about 0.26 s after
+     * handover, and declines to register permanently if it is still zero. Core
+     * 1 retries the probe every 250 ms until the master answers, so without
+     * this the two race and the machine boots without a disk -- reported as
+     * "no storage offered by the master", which reads like a missing card.
+     *
+     * A second is far longer than the round trip needs and is only spent when
+     * the master is genuinely absent, in which case there is no disk anyway.
+     */
+    for (int i = 0; i < 200 && FRANK_RING_SHARED->blk.capacity == 0; i++)
+        sleep_ms(5);
+
+    ring_puts("afboot: link capacity ");
+    ring_putdec(FRANK_RING_SHARED->blk.capacity);
+    ring_puts(" sectors\r\n");
+
     /* Let core 1 push the last of that out before the kernel takes over and
      * starts writing to the same ring. */
     sleep_ms(50);
