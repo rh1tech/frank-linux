@@ -51,12 +51,106 @@ void frank_ring_init(void)
     frank_ring_barrier();
 }
 
+/*
+ * Console fan-out.
+ *
+ * Linux writes one stream, and two different things want to display it: the USB
+ * CDC console and, over the link, the master's HDMI terminal. A byte can only
+ * be taken out of the ring once, so it is taken once into this buffer and each
+ * consumer reads it at its own pace.
+ *
+ * A consumer only holds data back while it is actually there. USB counts as
+ * present when it is enumerated, the link when the master has answered. An
+ * absent consumer has its tail snapped forward, so an unplugged USB cable
+ * cannot stop the HDMI console and a missing master cannot stop USB. Without
+ * that, whichever one is not connected fills the buffer and stalls the other.
+ *
+ * When NEITHER is present the ring is not drained at all. That is not the same
+ * as snapping both tails: draining into a buffer nobody reads throws the data
+ * away, and the data in question is the boot log. F12 is exactly this failure
+ * -- afboot printed its banner before USB enumerated, the bytes went into a
+ * FIFO no one was attached to, and the screen stayed blank. Holding it in the
+ * ring means it is still there when a console finally appears.
+ */
+#define FAN_SIZE 1024u
+#define FAN_MASK (FAN_SIZE - 1u)
+
+static uint8_t fan[FAN_SIZE];
+static uint32_t fan_head, fan_usb_tail, fan_link_tail;
+
+static inline uint32_t fan_used(uint32_t tail)
+{
+    return (fan_head - tail) & FAN_MASK;
+}
+
+static uint32_t fan_take(uint32_t *tail, uint8_t *dst, uint32_t max)
+{
+    uint32_t n = fan_used(*tail);
+
+    if (n > max)
+        n = max;
+    for (uint32_t i = 0; i < n; i++)
+        dst[i] = fan[(*tail + i) & FAN_MASK];
+    *tail = (*tail + n) & FAN_MASK;
+    return n;
+}
+
+/* Defined by the link service when one is linked in; see core1_blk.c. */
+__attribute__((weak)) bool frank_link_console_up(void) { return false; }
+
+/* Bytes waiting for the master's terminal, and keystrokes coming back. Called
+ * from the link service, on the same core, so no locking is needed. */
+uint32_t frank_console_take(uint8_t *dst, uint32_t max)
+{
+    return fan_take(&fan_link_tail, dst, max);
+}
+
+void frank_console_feed(const uint8_t *src, uint32_t n)
+{
+    frank_ring_put(&FRANK_RING_SHARED->rx, src, n);
+}
+
+static void __not_in_flash_func(fan_fill)(void)
+{
+    frank_ring_shared_t *s = FRANK_RING_SHARED;
+    uint8_t buf[64];
+    bool usb_up = tud_ready();
+    bool link_up = frank_link_console_up();
+    uint32_t held = 0;
+
+    if (!usb_up && !link_up)
+        return;
+
+    if (!usb_up)
+        fan_usb_tail = fan_head;
+    else
+        held = fan_used(fan_usb_tail);
+
+    if (!link_up)
+        fan_link_tail = fan_head;
+    else if (fan_used(fan_link_tail) > held)
+        held = fan_used(fan_link_tail);
+
+    uint32_t room = FAN_MASK - held;
+    if (room > sizeof(buf))
+        room = sizeof(buf);
+    if (!room)
+        return;
+
+    uint32_t n = frank_ring_get(&s->tx, buf, room);
+    for (uint32_t i = 0; i < n; i++)
+        fan[(fan_head + i) & FAN_MASK] = buf[i];
+    fan_head = (fan_head + n) & FAN_MASK;
+}
+
 static void __not_in_flash_func(service_once)(void)
 {
     frank_ring_shared_t *s = FRANK_RING_SHARED;
     uint8_t buf[64];
 
     tud_task();
+
+    fan_fill();
 
     /*
      * Linux -> host.
@@ -79,7 +173,7 @@ static void __not_in_flash_func(service_once)(void)
         if (room > sizeof(buf))
             room = sizeof(buf);
         if (room) {
-            uint32_t n = frank_ring_get(&s->tx, buf, room);
+            uint32_t n = fan_take(&fan_usb_tail, buf, room);
             if (n) {
                 tud_cdc_write(buf, n);
                 tud_cdc_write_flush();

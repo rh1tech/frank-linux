@@ -13,10 +13,16 @@
  * the card went in, a failure was the card and not the protocol -- the same
  * reason the console was proven with core 0 standing in for Linux.
  *
- * Deliberately does NOT bring up HDMI or the USB HID host yet: F3 measured that
- * enabling the HID host costs this half 3x its memory bandwidth and 20x its link
- * round-trip, and mixing that into the first block bring-up would confuse
- * "slow" with "broken".
+ * It also drives the HDMI console: DispHSTX scans out a 640x480p60 DVI signal
+ * and the VersaTerm-derived terminal engine turns the byte stream from Linux
+ * into 80x25 text. Both are Protea's, unmodified -- the FRANK master's HDMI pin
+ * map is byte-identical to Protea's DISPHSTX_DVI_PINOUT 2, so the video path
+ * needed no porting at all. What changed is only where the terminal's bytes
+ * come from and go to (term/term_compat.c).
+ *
+ * The USB HID host is deliberately still off: F3 measured that enabling it
+ * costs this half 3x its memory bandwidth and 20x its link round-trip, and
+ * mixing that in before the display is proven would confuse slow with broken.
  */
 
 #include <stdio.h>
@@ -29,7 +35,11 @@
 
 #include "link_blk.h"
 #include "link_bus.h"
+#include "display.h"
+#include "framebuf.h"
 #include "storage.h"
+#include "term_compat.h"
+#include "terminal.h"
 
 #ifndef CPU_SPEED
 #define CPU_SPEED 252
@@ -94,6 +104,8 @@ static int32_t do_request(const link_blk_req_t *req)
         return -22;                                     /* -EINVAL */
     if (req->op == LINK_BLK_OP_INFO)
         return 0;
+    if (req->op == LINK_BLK_OP_CON)
+        return req->count <= LINK_CON_MAX_TX ? 0 : -22;
     if (req->count == 0 || req->count > LINK_BLK_MAX_SECTORS)
         return -22;
     if (req->lba + req->count > capacity_sectors)
@@ -106,12 +118,28 @@ int main(void)
     clocks_bringup();
     stdio_init_all();
 
+    /*
+     * Video first, because DispHstxSelDispMode() repoints clk_peri at clk_sys.
+     * Any UART divisor computed before that comes out 252/48 = 5.25x too fast,
+     * which is Protea's documented trap. Re-pin clk_peri to the USB PLL after,
+     * then re-init stdio so the console baud is exact again.
+     */
+    display_init();
+    clock_configure(clk_peri, 0,
+                    CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB,
+                    48 * MHZ, 48 * MHZ);
+    stdio_init_all();
+
+    framebuf_init();
+    terminal_init();
+
     for (int i = 0; i < 6; i++) {
         printf("master-ioserver - waiting for console (%d/6)\n", i + 1);
         sleep_ms(200);
     }
     printf("\n=== FRANK master I/O server ===\n");
     capacity_sectors = storage_init(&medium);
+
     printf("sys_clk %u MHz, medium %s, %u sectors (%u KiB)\n",
            (unsigned)(clock_get_hz(clk_sys) / 1000000u), medium,
            (unsigned)capacity_sectors, (unsigned)(capacity_sectors / 2u));
@@ -121,6 +149,13 @@ int main(void)
               LINK_DB_OUT, LINK_DB_IN, LINK_FS, true);
     link_use_ctrl_rate(&link);
     printf("RESULT ioserver ready\n");
+
+    /* Something for the capture card to decode before Linux says anything, so
+     * a blank screen can be told apart from a screen nobody has written to. */
+    terminal_receive_string("\033[2J\033[HFRANK master I/O server ready\r\n");
+    terminal_receive_string("HDMI 640x480p60, 80x25, medium ");
+    terminal_receive_string(medium);
+    terminal_receive_string("\r\n");
 
     uint32_t served = 0, errors = 0;
 
@@ -134,13 +169,15 @@ int main(void)
          * is distinguishable from "wedged" without a debugger. */
         if (!link_db_get(&link)) {
             static uint32_t spins;
+            display_tick();
             if (++spins % 20000000u == 0)
                 printf("RESULT ioserver idle db_in=%u served=%u errors=%u\n",
                        (unsigned)link_db_get(&link),
                        (unsigned)served, (unsigned)errors);
             continue;
         }
-        printf("RESULT ioserver doorbell seen\n");
+        if (0)
+            printf("RESULT ioserver doorbell seen\n");
 
         link_blk_req_t req;
         link_rx_arm(&link, &req, sizeof(req));
@@ -154,8 +191,31 @@ int main(void)
         }
 
         int32_t status = do_request(&req);
-        uint32_t bytes = (status == 0 && req.op != LINK_BLK_OP_INFO)
-                         ? req.count * LINK_BLK_SECTOR : 0;
+        uint32_t bytes = 0;
+        if (status == 0 && req.op == LINK_BLK_OP_CON)
+            bytes = req.count;                       /* console: raw bytes */
+        else if (status == 0 && req.op != LINK_BLK_OP_INFO)
+            bytes = req.count * LINK_BLK_SECTOR;
+
+        /*
+         * Console output from Linux, straight into the terminal engine.
+         *
+         * The frame on the wire is padded up to a whole word because the link's
+         * DMA moves 32-bit words and silently drops any remainder. The header
+         * carries the real length, so receive the padded size and use only what
+         * was actually sent.
+         */
+        if (status == 0 && req.op == LINK_BLK_OP_CON && bytes) {
+            uint32_t padded = (bytes + 3u) & ~3u;
+
+            link_rx_arm(&link, xfer, padded);
+            if (link_rx_wait(&link, 1000000) != 0) {
+                status = -5;
+            } else {
+                for (uint32_t i = 0; i < bytes; i++)
+                    terminal_receive_char(xfer[i]);
+            }
+        }
 
         if (status == 0 && req.op == LINK_BLK_OP_WRITE) {
             link_rx_arm(&link, xfer, bytes);
@@ -170,11 +230,21 @@ int main(void)
         if (status == 0 && req.op == LINK_BLK_OP_READ)
             status = storage_read(req.lba, req.count, reply + sizeof(link_blk_rsp_t));
 
-        link_blk_rsp_t rsp = { .status = status, .capacity = capacity_sectors };
-        memcpy(reply, &rsp, sizeof(rsp));
+        link_blk_rsp_t rsp = { .status = status, .value = capacity_sectors };
+        uint32_t reply_bytes = sizeof(rsp);
 
-        uint32_t reply_bytes = sizeof(rsp)
-                             + ((status == 0 && req.op == LINK_BLK_OP_READ) ? bytes : 0);
+        if (status == 0 && req.op == LINK_BLK_OP_READ) {
+            reply_bytes += bytes;
+        } else if (req.op == LINK_BLK_OP_CON) {
+            /* Always the full key buffer, valid count in the header: the slave
+             * has to arm for an exact size before it knows what is waiting. */
+            memset(reply + sizeof(rsp), 0, LINK_CON_MAX_KEYS);
+            rsp.value = term_compat_take_keys(reply + sizeof(rsp),
+                                              LINK_CON_MAX_KEYS);
+            reply_bytes += LINK_CON_MAX_KEYS;
+        }
+
+        memcpy(reply, &rsp, sizeof(rsp));
         link_tx_start(&link, reply, reply_bytes);
         if (!link_tx_finish(&link, 2000000))
             errors++;
@@ -184,8 +254,10 @@ int main(void)
             tight_loop_contents();
 
         if (status == 0) served++; else errors++;
-        if (true)
-            printf("RESULT ioserver served=%u errors=%u\n",
-                   (unsigned)served, (unsigned)errors);
+        /* Console transactions run at 200 Hz; logging each one would drown the
+         * console in its own bookkeeping. */
+        if (req.op != LINK_BLK_OP_CON)
+            printf("RESULT ioserver op=%u served=%u errors=%u\n",
+                   (unsigned)req.op, (unsigned)served, (unsigned)errors);
     }
 }

@@ -48,7 +48,20 @@ enum {
     LINK_BLK_OP_READ  = 0,
     LINK_BLK_OP_WRITE = 1,
     LINK_BLK_OP_INFO  = 2,     /* ask the master for the card's capacity */
+    LINK_BLK_OP_CON   = 3,     /* console: send output, collect keystrokes */
 };
+
+/*
+ * Console payload sizes.
+ *
+ * The reply is a FIXED size regardless of how many keys are waiting, because
+ * the receiver has to arm for an exact byte count before the sender starts and
+ * the slave cannot know in advance how much the master will have to say. So the
+ * master always sends the full key buffer and puts the valid count in the reply
+ * header. Everything on this wire is a size the other end can predict.
+ */
+#define LINK_CON_MAX_TX   64u      /* console bytes per transaction */
+#define LINK_CON_MAX_KEYS 32u      /* keystroke bytes, always sent in full */
 
 typedef struct __attribute__((packed)) {
     uint32_t magic;
@@ -59,7 +72,7 @@ typedef struct __attribute__((packed)) {
 
 typedef struct __attribute__((packed)) {
     int32_t  status;           /* 0, or negative errno */
-    uint32_t capacity;         /* sectors, valid for INFO */
+    uint32_t value;            /* INFO: sectors. CON: valid key bytes. */
 } link_blk_rsp_t;
 
 #endif /* LINK_BLK_H */

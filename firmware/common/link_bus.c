@@ -6,6 +6,8 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+#include <assert.h>
+
 #include "link_bus.h"
 #include "link_bus.pio.h"
 
@@ -145,7 +147,14 @@ uint32_t link_byte_rate(const link_t *l) {
 
 void link_tx_start(link_t *l, const void *buf, size_t bytes) {
     /* The PIO FIFO is 32 bits wide and autopull is 32-bit, so frames
-     * must be a whole number of words. Callers use word-sized frames. */
+     * must be a whole number of words.
+     *
+     * A non-word-multiple length is a caller bug, and it used to be a silent
+     * one: the remainder was dropped and the receiver, still waiting for the
+     * missing bytes, mis-framed every transfer after it. The console path hit
+     * this and produced a boot log that decayed into fragments of itself.
+     * Callers pad; this catches the ones that forget. */
+    assert((bytes & 3u) == 0);
     size_t words = bytes / 4;
 
     gpio_put(l->tx_valid, 1);

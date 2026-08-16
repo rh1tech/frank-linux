@@ -40,9 +40,12 @@ static bool blk_link_up;
  * has no other way to say what went wrong, and "capacity 0" on the kernel side
  * is the same answer for every possible failure. */
 static size_t blk_rx_remaining;
-static int32_t blk_init_status;
+static int32_t blk_init_status = -19;
+static bool blk_probe_done;
 
 void frank_ring_puts(const char *s);
+uint32_t frank_console_take(uint8_t *dst, uint32_t max);
+void frank_console_feed(const uint8_t *src, uint32_t n);
 
 static void blk_report(const char *what, int32_t v)
 {
@@ -78,7 +81,22 @@ static int32_t blk_transact(uint32_t op, uint32_t lba, uint32_t count,
         .lba   = lba,
         .count = count,
     };
-    uint32_t bytes = count * LINK_BLK_SECTOR;
+    /*
+     * Bytes actually put on the wire.
+     *
+     * link_tx_start() sends `bytes / 4` words and drops any remainder without
+     * saying so -- the PIO FIFO is 32 bits wide and every earlier caller used
+     * sector- and header-sized frames, so nothing ever noticed. The console is
+     * the first caller with an arbitrary length, and an unpadded 37-byte write
+     * put 36 bytes on the wire while the receiver waited for 37. The leftover
+     * shifted every following transfer, which showed up as a boot log that
+     * started clean and decayed into fragments of itself.
+     *
+     * So console frames are padded up to a word. The true length travels in the
+     * request header, and the master uses that rather than what it received.
+     */
+    uint32_t bytes = (op == LINK_BLK_OP_CON) ? ((count + 3u) & ~3u)
+                                             : count * LINK_BLK_SECTOR;
 
     /*
      * Staging buffer for the reply, which is the status header immediately
@@ -99,8 +117,13 @@ static int32_t blk_transact(uint32_t op, uint32_t lba, uint32_t count,
     static uint8_t reply[sizeof(link_blk_rsp_t)
                          + LINK_BLK_MAX_SECTORS * LINK_BLK_SECTOR]
                    __attribute__((aligned(4)));
-    link_blk_rsp_t rsp = { .status = -5, .capacity = 0 };
-    uint32_t reply_bytes = sizeof(rsp) + ((op == LINK_BLK_OP_READ) ? bytes : 0);
+    link_blk_rsp_t rsp = { .status = -5, .value = 0 };
+    uint32_t reply_bytes = sizeof(rsp);
+
+    if (op == LINK_BLK_OP_READ)
+        reply_bytes += bytes;
+    else if (op == LINK_BLK_OP_CON)
+        reply_bytes += LINK_CON_MAX_KEYS;
 
     if (!blk_link_up)
         return -19;                                     /* -ENODEV */
@@ -122,7 +145,7 @@ static int32_t blk_transact(uint32_t op, uint32_t lba, uint32_t count,
     if (!link_tx_finish(&blk_link, 1000000))
         goto fail;
 
-    if (op == LINK_BLK_OP_WRITE) {
+    if (op == LINK_BLK_OP_WRITE || (op == LINK_BLK_OP_CON && bytes)) {
         link_tx_start(&blk_link, buf, bytes);
         if (!link_tx_finish(&blk_link, 3000000))
             goto fail;
@@ -135,9 +158,14 @@ static int32_t blk_transact(uint32_t op, uint32_t lba, uint32_t count,
     memcpy(&rsp, reply, sizeof(rsp));
     if (rsp.status == 0 && op == LINK_BLK_OP_READ)
         memcpy(buf, reply + sizeof(rsp), bytes);
+    else if (rsp.status == 0 && op == LINK_BLK_OP_CON && rsp.value) {
+        uint32_t keys = rsp.value > LINK_CON_MAX_KEYS ? LINK_CON_MAX_KEYS
+                                                      : rsp.value;
+        frank_console_feed(reply + sizeof(rsp), keys);
+    }
 
     if (capacity_out)
-        *capacity_out = rsp.capacity;
+        *capacity_out = rsp.value;
 
     link_db_set(&blk_link, false);
     link_db_wait(&blk_link, false, 1000000);
@@ -196,6 +224,49 @@ static void blk_probe_once(void)
 }
 
 /*
+ * Is the master's terminal there to receive console output?
+ *
+ * Answering "no" until the master has proved it is listening is what stops the
+ * console fan-out from holding bytes for a consumer that does not exist. The
+ * capacity probe is that proof: it is a round trip the master had to answer.
+ */
+bool frank_link_console_up(void)
+{
+    return blk_probe_done && blk_init_status == 0;
+}
+
+/*
+ * One console transaction: hand over whatever Linux has written, take back
+ * whatever was typed.
+ *
+ * Rate-limited rather than run every pass. The link costs 141 us per control
+ * round trip idle and 2753 us with the master's USB HID host running (F3), and
+ * a service loop that spins at tens of kHz would spend the entire link on
+ * asking "anything typed?". 200 Hz is far faster than a person types and leaves
+ * the wire almost entirely free for block traffic. Output does not wait for the
+ * timer: if there is anything to show, it goes immediately.
+ */
+static void console_pump(void)
+{
+    static uint8_t out[LINK_CON_MAX_TX + 4] __attribute__((aligned(4)));
+    static uint32_t next_poll_us;
+    uint32_t now = time_us_32();
+    uint32_t n = frank_console_take(out, LINK_CON_MAX_TX);
+
+    if (!n && (int32_t)(now - next_poll_us) < 0)
+        return;
+    next_poll_us = now + 5000u;
+
+    /* Clear the pad so stale bytes from an earlier, longer frame are not what
+     * gets transmitted. The master ignores them, but only because it is told
+     * the real length; leaving them undefined makes a protocol bug invisible. */
+    for (uint32_t i = n; i < ((n + 3u) & ~3u); i++)
+        out[i] = 0;
+
+    blk_transact(LINK_BLK_OP_CON, 0, n, out, NULL);
+}
+
+/*
  * Called from core 1's service loop. Polls rather than takes an interrupt:
  * there is no cross-core doorbell wired for this, and core 1 has nothing else
  * to do between USB passes.
@@ -213,8 +284,11 @@ void frank_blk_service(void)
             return;
         probed = true;
         blk_probe_once();
+        blk_probe_done = true;
         return;
     }
+
+    console_pump();
 
     seq = s->blk.seq;
 

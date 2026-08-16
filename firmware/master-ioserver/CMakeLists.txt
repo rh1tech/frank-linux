@@ -23,16 +23,33 @@ project(master-ioserver C CXX ASM)
 set(CMAKE_C_STANDARD 11)
 pico_sdk_init()
 
+# DispHSTX (DVI over the HSTX peripheral), vendored from Protea.
+add_subdirectory(lib/DispHSTX DispHSTX)
+
 add_executable(master-ioserver
     src/main.c
     src/storage.c
+    src/display_tick.c
+    term/display.c
+    term/cellbuf.c
+    term/textmode_render.c
+    term/font.c
+    term/palette.c
+    term/framebuf.c
+    term/terminal.c
+    term/term_compat.c
     sdcard/sdcard.c
     ${FW_ROOT}/common/link_bus.c
 )
 
 pico_generate_pio_header(master-ioserver ${FW_ROOT}/common/link_bus.pio)
 
-target_include_directories(master-ioserver PRIVATE src sdcard ${FW_ROOT}/common)
+target_include_directories(master-ioserver PRIVATE src sdcard term ${FW_ROOT}/common)
+
+# DispHSTX reads its configuration from whatever is force-included ahead of its
+# own _config.h; there is no other way to override it.
+target_compile_options(master-ioserver PRIVATE
+    -include ${CMAKE_CURRENT_LIST_DIR}/term/config.h)
 
 target_compile_definitions(master-ioserver PRIVATE
     CPU_SPEED=${CPU_SPEED}
@@ -48,6 +65,7 @@ target_compile_definitions(master-ioserver PRIVATE
 target_compile_options(master-ioserver PRIVATE -O2 -Wall -Wextra -Wno-unused-parameter)
 
 target_link_libraries(master-ioserver
+    DispHSTX
     pico_stdlib
     hardware_clocks
     hardware_dma
