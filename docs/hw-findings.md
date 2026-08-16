@@ -849,10 +849,21 @@ reads exactly like a board fault.
 Neither is a race that shows up under load or once in a hundred runs. Both are
 certain, given the overlap.
 
-**The rule:** while a gate is running, the working tree is the gate's, not
-mine. Editing anything under `tools/` or `build/` during a run means the result
-is not evidence about the code -- it is evidence about a file that no longer
-exists in the form that was being read.
+**The rule:** while something is running, the state it reads belongs to it, not
+to me. Editing anything under `tools/` or `build/` during a gate means the
+result is not evidence about the code -- it is evidence about a file that no
+longer exists in the form that was being read.
+
+There is a third piece of shared state, which I then walked into anyway: the
+Buildroot tree in the `frank-linux-br` volume. `make volumes` does
+`git checkout -q -- . && for p in buildroot-patches/*; do git apply; done`, so
+running it re-writes every patched file -- and I ran it to regenerate a patch
+while `make slave` was building the kernel. The window is short and the end
+state is correct, so that build survived, which is the worst way for a mistake
+like this to turn out: it teaches nothing until the time it does not survive.
+
+The three are `tools/`, `build/`, and `/br`. All of them are read by something
+that is already running.
 
 This also explains a class of failure I have blamed on the hardware more than
 once. `probe.sh` and `flash-slave.sh` are sourced and executed by every gate; an
