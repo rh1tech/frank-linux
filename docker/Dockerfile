@@ -14,7 +14,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         rsync bc bzip2 xz-utils findutils diffutils perl python3 \
         bison flex libssl-dev libncurses-dev gawk texinfo help2man \
         libtool-bin automake autoconf pkg-config \
+        genromfs \
     && rm -rf /var/lib/apt/lists/* && apt-get clean
+
+# genromfs, because Buildroot has no romfs target and cramfs cannot stand in.
+#
+# romfs is what makes execute-in-place work on this board: it stores files
+# uncompressed and contiguously, so fs/romfs/mmap-nommu.c can hand a process a
+# pointer straight into the memory-mapped flash and program text costs no RAM.
+# cramfs has an XIP path too, but only for blocks flagged UNCOMPRESSED|DIRECT_PTR
+# and stock mkcramfs does not emit those -- it would silently fall back to
+# copying every page, which is the thing we are trying to avoid.
 
 # Buildroot refuses to run as root, and building as root would also leave
 # root-owned files in any bind-mounted directory. The UID is passed in at build

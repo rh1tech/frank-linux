@@ -819,6 +819,64 @@ stall it, while block requests can still wait seconds for a busy card.
 
 Every one of these presented as silence somewhere unrelated to its cause.
 
+## F25. Execute-in-place from flash: 384 kB of program text for no RAM
+
+```
+# /mnt/rom/bin/busybox echo XIP_RUNS_FROM_FLASH
+XIP_RUNS_FROM_FLASH
+# cat /proc/43/maps
+1096a000-109ca000 r-xp  /mnt/rom/bin/busybox      <- 384 kB of text, in flash
+11350000-11353000 rw-p  /mnt/rom/bin/busybox      <- 12 kB of data, in RAM
+11480000-114d7000 r-xp  /lib/libuClibc-1.0.52.so  <- still from ramfs
+```
+
+`free` moved by 20 kB across that exec. Copying busybox would have cost 400.
+
+QMI keeps the 16 MB QSPI flash mapped read-only at 0x10000000, so the chain is:
+physmap as `mtd-rom` -> `map_rom`, which implements `mtd->_point` -> romfs
+backed by MTD -> `romfs_get_unmapped_area()` -> a direct mapping the FDPIC
+loader can use. Text executes where it lies and one `libc.so` serves every
+process without being duplicated.
+
+That matters more here than the size saving suggests. The same userspace in a
+RAM-resident initramfs spends about 2 MB of the 8 MB permanently; from a block
+device it would be copied in per process, libc included, because a block-backed
+filesystem cannot be pointed at either.
+
+### Four things had to be right, and each failed silently
+
+**`MISC_FILESYSTEMS` was off**, inherited from mps2_defconfig. romfs lives under
+that menuconfig, so its symbols were not merely unset, they were never offered:
+they vanish from .config without a word. Worse, enabling it earlier in the
+defconfig does nothing -- a defconfig is read in order and the later
+`# CONFIG_MISC_FILESYSTEMS is not set` wins.
+
+**tmpfs cannot exist here.** `TMPFS` depends on `SHMEM`, which `depends on MMU`.
+ramfs is the substitute -- same idea, no size limit, so anything writing without
+bound eats the machine.
+
+**genromfs needs `-a 4096`.** It aligns file data to 16 bytes by default;
+`romfs_get_unmapped_area()` hands MTD the file's data offset and NOMMU only
+accepts a page-aligned result. Misaligned, every file is quietly rejected and
+copied into RAM instead -- no error, no message, and a userspace that costs
+exactly what it would have from a block device. Costs up to 4 kB of padding per
+file: 1564 kB became 1840 kB.
+
+**The MPU marked the flash execute-never.** `pmsav8_setup()` maps everything
+that is not system RAM as device memory with XN, which is right for peripherals
+and wrong for ROM. The mapping then succeeds --
+
+```
+FDPIC mmap[2] <file> sz=c90 pr=5 fl=2 of=0 --> 10964000
+```
+
+-- and the process dies on its first instruction fetch with an IACCVIOL whose
+MMFSR carries no valid address, so the reported fault address is 0 and points
+nowhere near the cause. Patch 0008 adds `ARM_MPU_ROM_BASE`/`SIZE`, carving the
+window out of the IO ranges and giving it a region of its own: Normal memory,
+read-only, executable, PL0-readable. Six of eight regions before the kernel
+split, seven after.
+
 ## F24. Stage 1: full nano, and two bugs it uncovered
 
 nano needed no source patch. Buildroot forces `--enable-tiny` on NOMMU with the

@@ -25,7 +25,7 @@ stack is pure overhead in 8 MB.
 
 --- /dev/null
 +++ b/arch/arm/configs/rp2350_defconfig
-@@ -0,0 +1,120 @@
+@@ -0,0 +1,156 @@
 +CONFIG_NO_HZ_IDLE=y
 +CONFIG_HIGH_RES_TIMERS=y
 +CONFIG_PREEMPT_VOLUNTARY=y
@@ -59,6 +59,27 @@ stack is pure overhead in 8 MB.
 +# leaves the partition table alone.
 +CONFIG_BLK_DEV_LOOP=y
 +CONFIG_BLK_DEV_LOOP_MIN_COUNT=2
++# The flash, as memory rather than as a device.
++#
++# QMI keeps chip-select 0 mapped read-only at 0x10000000, so physmap can treat
++# it as ROM (mtd-rom -> map_rom), and map_rom implements mtd->_point. That is
++# what romfs needs: with an MTD it can point at, fs/romfs/mmap-nommu.c gives
++# NOMMU a direct mapping and program text executes in place from flash, costing
++# no RAM. A userspace in a RAM-resident initramfs costs about 2 MB of the 8 MB
++# permanently; one on a block device would be copied in per process, libc
++# included, because a block-backed filesystem cannot be pointed at.
++CONFIG_MTD=y
++CONFIG_MTD_PHYSMAP=y
++CONFIG_MTD_PHYSMAP_OF=y
++CONFIG_MTD_ROM=y
++CONFIG_MTD_OF_PARTS=y
++CONFIG_ROMFS_FS=y
++CONFIG_ROMFS_BACKED_BY_MTD=y
++
++# No tmpfs: TMPFS depends on SHMEM, and SHMEM depends on MMU. /tmp and /var get
++# ramfs instead, which is the NOMMU substitute -- same idea, no swap, and no
++# size limit, so anything writing without bound there eats the machine.
++
 +CONFIG_EXT4_FS=y
 +CONFIG_VFAT_FS=y
 +CONFIG_NLS_CODEPAGE_437=y
@@ -92,7 +113,14 @@ stack is pure overhead in 8 MB.
 +CONFIG_ARM_TIMER_SP804=y
 +# CONFIG_DNOTIFY is not set
 +# CONFIG_INOTIFY_USER is not set
-+# CONFIG_MISC_FILESYSTEMS is not set
++# romfs lives under this menuconfig. mps2_defconfig turns it off, and with it
++# off the ROMFS symbols are not merely unset -- they are never offered, so they
++# vanish from .config with no warning and the filesystem is simply absent.
++#
++# It has to be enabled *here* rather than earlier in the file: a defconfig is
++# read in order and the last line about a symbol wins, so an enable further up
++# is silently undone by this one.
++CONFIG_MISC_FILESYSTEMS=y
 +CONFIG_NFS_FS=y
 +CONFIG_NFS_V4=y
 +CONFIG_NFS_V4_1=y
@@ -137,6 +165,14 @@ stack is pure overhead in 8 MB.
 +# -- and the peripherals are all covered without anything board-specific. Five
 +# of the eight regions are used.
 +CONFIG_ARM_MPU=y
++
++# The 16 MB QSPI flash, which QMI keeps mapped read-only at 0x10000000.
++#
++# Without this the MPU maps it as device memory, execute-never, along with
++# everything else that is not RAM -- and executing from a romfs in flash fails
++# at the first instruction fetch, long after the mapping reported success.
++CONFIG_ARM_MPU_ROM_BASE=0x10000000
++CONFIG_ARM_MPU_ROM_SIZE=0x1000000
 +
 +# Kernel text read-only, kernel data non-executable, enforced by the MPU.
 +# Needs patch 0007: mainline only offers ARCH_HAS_STRICT_KERNEL_RWX when there

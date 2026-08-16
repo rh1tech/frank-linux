@@ -31,6 +31,10 @@ BR2_OPTIMIZE_S=y
 # See board/frank/core2-proto/post-build.sh for why it matters on NOMMU.
 BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_FRANK_LINUX_PATH)/board/frank/core2-proto/post-build.sh"
 
+# romfs, built by post-image because Buildroot has no romfs target. This is the
+# image the board actually executes from -- see the script for why not cramfs.
+BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_FRANK_LINUX_PATH)/board/frank/core2-proto/post-image.sh"
+
 # Kernel
 BR2_LINUX_KERNEL=y
 BR2_LINUX_KERNEL_CUSTOM_VERSION=y

@@ -1,0 +1,123 @@
+ARM: pmsa-v8: let code run from a memory-mapped ROM window
+
+pmsav8_setup() maps everything that is not system RAM as device memory, marked
+execute-never. That is right for peripherals and wrong for flash: a board whose
+NOR or QSPI flash is memory-mapped can execute directly out of it, which on
+NOMMU is the difference between program text costing nothing and costing a full
+copy in RAM per process.
+
+The failure without this is unhelpful. romfs on an MTD that supports ->_point
+hands the FDPIC loader a direct mapping, the loader reports success --
+
+  FDPIC mmap[2] <file> sz=c90 pr=5 fl=2 of=0 --> 10964000
+
+-- and the process then dies on its first instruction fetch with an IACCVIOL,
+whose MMFSR carries no valid address. Everything up to the fault looks correct.
+
+So describe the window: ARM_MPU_ROM_BASE and ARM_MPU_ROM_SIZE carve it out of
+the IO ranges and give it a region of its own, Normal memory rather than device,
+read-only, executable, and readable by user mode -- which is what makes
+execute-in-place reach userspace rather than just the kernel.
+
+Both default to zero, and the code compiles out entirely when the size is zero.
+
+Signed-off-by: Mikhail Matveev <xtreme@rh1.tech>
+
+--- a/arch/arm/mm/Kconfig
++++ b/arch/arm/mm/Kconfig
+@@ -1123,6 +1123,30 @@
+ config ARM_HEAVY_MB
+ 	bool
+ 
++config ARM_MPU_ROM_BASE
++	hex "Base address of an executable ROM window"
++	depends on ARM_MPU
++	default 0x0
++	help
++	  Physical base of a read-only memory window that code may be executed
++	  from directly -- memory-mapped NOR or QSPI flash, typically.
++
++	  pmsav8_setup() maps everything that is not system RAM as device
++	  memory and marks it execute-never, which is right for peripherals and
++	  wrong for ROM. Without this, execute-in-place from a romfs on MTD
++	  fails at the first instruction fetch with an IACCVIOL, after the
++	  mapping itself has succeeded -- so the fault appears to come from
++	  nowhere near the cause.
++
++	  Leave at 0 if there is no such window.
++
++config ARM_MPU_ROM_SIZE
++	hex "Size of the executable ROM window"
++	depends on ARM_MPU
++	default 0x0
++	help
++	  Size in bytes of the window at ARM_MPU_ROM_BASE. Zero disables it.
++
+ config DEBUG_ALIGN_RODATA
+ 	bool "Make rodata strictly non-executable"
+ 	# MMU as well as STRICT_KERNEL_RWX: this pads rodata out to a section
+--- a/arch/arm/mm/pmsa-v8.c
++++ b/arch/arm/mm/pmsa-v8.c
+@@ -174,6 +174,37 @@
+ 	return __pmsav8_setup_region(number, bar, lar);
+ }
+ 
++#if CONFIG_ARM_MPU_ROM_SIZE != 0
++/*
++ * Read-only memory that code runs from in place.
++ *
++ * Normal rather than device memory, and executable: this is ROM, not a
++ * peripheral. Mapping it the way pmsav8_setup_io() maps everything else --
++ * device, execute-never -- makes the mapping succeed and the first instruction
++ * fetch fail, which is a long way from the cause.
++ *
++ * PL0 gets read access too, so user processes can execute from it. That is the
++ * entire point: with an MTD that can be pointed at, romfs hands a process a
++ * direct mapping into flash and program text costs no RAM at all.
++ */
++static int __init pmsav8_setup_rom(unsigned int number, phys_addr_t start,
++				   phys_addr_t end)
++{
++	u32 bar, lar;
++
++	if (is_region_fixed(number))
++		return -EINVAL;
++
++	bar = start;
++	lar = (end - 1) & ~(PMSAv8_MINALIGN - 1);
++
++	bar |= PMSAv8_AP_PL1RO_PL0RO | PMSAv8_RGN_SHARED;
++	lar |= PMSAv8_LAR_IDX(PMSAv8_RGN_NORMAL) | PMSAv8_LAR_EN;
++
++	return __pmsav8_setup_region(number, bar, lar);
++}
++#endif
++
+ static int __init pmsav8_setup_io(unsigned int number, phys_addr_t start,phys_addr_t end)
+ {
+ 	u32 bar, lar;
+@@ -405,6 +436,12 @@
+ 	for (i = 0; i < ARRAY_SIZE(mem); i++)
+ 		subtract_range(io, ARRAY_SIZE(io), mem[i].start, mem[i].end);
+ 
++#if CONFIG_ARM_MPU_ROM_SIZE != 0
++	/* IO: exclude the ROM window, which gets a region of its own below. */
++	subtract_range(io, ARRAY_SIZE(io), CONFIG_ARM_MPU_ROM_BASE,
++		       CONFIG_ARM_MPU_ROM_BASE + CONFIG_ARM_MPU_ROM_SIZE);
++#endif
++
+ 	/* Now program MPU */
+ 
+ #ifdef CONFIG_XIP_KERNEL
+@@ -415,6 +452,11 @@
+ 	err |= pmsav8_setup_fixed(region++, __pa(KERNEL_START), __pa(KERNEL_END));
+ 
+ 
++#if CONFIG_ARM_MPU_ROM_SIZE != 0
++	err |= pmsav8_setup_rom(region++, CONFIG_ARM_MPU_ROM_BASE,
++				CONFIG_ARM_MPU_ROM_BASE + CONFIG_ARM_MPU_ROM_SIZE);
++#endif
++
+ 	/* IO */
+ 	for (i = 0; i < ARRAY_SIZE(io); i++) {
+ 		if (!io[i].end)

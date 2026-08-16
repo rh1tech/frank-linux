@@ -15,7 +15,6 @@ do not.
 The console node is at 0x2007e000 -- the top of *main* SRAM, deliberately not
 the 0x20080000 that looks like the top of SRAM and is actually SCRATCH_X, the
 core 1 stack.
-
 --- a/arch/arm/boot/dts/Makefile
 +++ b/arch/arm/boot/dts/Makefile
 @@ -12,6 +12,7 @@
@@ -120,7 +119,7 @@ core 1 stack.
 +};
 --- /dev/null
 +++ b/arch/arm/boot/dts/frank/frank-core2-proto-slave.dts
-@@ -0,0 +1,34 @@
+@@ -0,0 +1,89 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * FRANK Core 2 Proto, slave half (U6, RP2350A) -- the half that runs Linux.
@@ -153,5 +152,60 @@ core 1 stack.
 +	memory@11000000 {
 +		device_type = "memory";
 +		reg = <0x11000000 0x800000>;
++	};
++
++	/*
++	 * The 16 MB QSPI flash, as memory rather than as a device.
++	 *
++	 * QMI keeps chip-select 0 mapped read-only at 0x10000000, so the flash
++	 * is addressable the way ROM is. "mtd-rom" gives it to physmap as
++	 * map_rom, which implements mtd->_point -- and that is the whole point:
++	 * romfs on an MTD that can be pointed at hands NOMMU a direct mapping
++	 * (fs/romfs/mmap-nommu.c), so program text executes in place from flash
++	 * and costs no RAM at all.
++	 *
++	 * That matters more here than it would anywhere else. With 8 MB of
++	 * PSRAM, a userspace in a RAM-resident initramfs spends 2 MB of it
++	 * permanently, and one loaded from a block device would have to copy
++	 * every binary in -- including a private copy of libc.so per process,
++	 * because a block-backed filesystem cannot be pointed at either.
++	 */
++	flash@10000000 {
++		compatible = "mtd-rom";
++		reg = <0x10000000 0x1000000>;
++		bank-width = <4>;
++		#address-cells = <1>;
++		#size-cells = <1>;
++
++		partitions {
++			compatible = "fixed-partitions";
++			#address-cells = <1>;
++			#size-cells = <1>;
++
++			/* Matches the offsets tools/flash-slave.sh writes. */
++			partition@0 {
++				label = "afboot";
++				reg = <0x000000 0x0f0000>;
++				read-only;
++			};
++
++			partition@f0000 {
++				label = "dtb";
++				reg = <0x0f0000 0x010000>;
++				read-only;
++			};
++
++			partition@100000 {
++				label = "kernel";
++				reg = <0x100000 0x700000>;
++				read-only;
++			};
++
++			partition@800000 {
++				label = "rootfs";
++				reg = <0x800000 0x800000>;
++				read-only;
++			};
++		};
 +	};
 +};

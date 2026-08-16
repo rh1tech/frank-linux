@@ -199,39 +199,55 @@ assert_half() {
     #
     # 30 ms is far more than the ROM needs to latch PACKAGE_SEL and far less
     # than any image needs to bring up a display.
-    # Identify, rescuing as needed, and never fail silently.
+    # Identify, and never fail silently.
     #
-    # Two things made this the worst step to get wrong. A wedged chip cannot be
-    # identified at all -- openocd reports "DP initialisation failed" and every
-    # read comes back empty -- so it has to be rescued first. And an empty read
-    # used to kill the calling script through `set -e` with nothing printed at
-    # all, so a wedged board looked like a script that simply stopped after
-    # "==> flashing slave".
+    # A wedged chip cannot be identified at all -- openocd reports "DP
+    # initialisation failed" or "cannot read IDR" and every read comes back
+    # empty -- so the caller has to be told that plainly rather than watch a
+    # script stop after "==> flashing slave".
     #
-    # Rescuing does NOT weaken the check. The reset afterwards still lets the
-    # ROM latch PACKAGE_SEL from the package pin, which is the thing being read.
-    # What must never happen is reading it while the chip is held in the rescue
-    # state, where it reads 0 for either package and the check passes for both
-    # halves -- failing open, on the one test whose whole job is to stop us
-    # writing a slave image onto the master.
+    # How long the image runs before being halted is per-role, because the two
+    # halves are dangerous at different moments:
+    #
+    #   master: 30 ms. Left running about a second it starts scanning out video,
+    #           and DispHSTX's DMA then fights openocd for SRAM -- "Could not
+    #           load data into target bounce buffer", a half-erased flash and a
+    #           chip that boots nothing (F19).
+    #
+    #   slave:  1 s. afboot reconfigures QMI for PSRAM in its first few tens of
+    #           milliseconds, and halting in the middle of that leaves XIP
+    #           broken -- which takes instruction fetch and the debug port with
+    #           it. The chip then answers nothing over SWD while core 1 happily
+    #           carries on serving USB, and only a BOOTSEL power-on recovers it.
+    #           The slave drives no display, so the long window costs nothing.
+    #
+    # Rescuing does NOT weaken the check: the reset still lets the ROM latch
+    # PACKAGE_SEL, which is the thing being read. What must never happen is
+    # reading it while the chip is held in the rescue state, where it reads 0
+    # for either package and passes for both halves.
+    local settle_ms
+    case "$role" in
+        master) settle_ms=30 ;;
+        *)      settle_ms=1000 ;;
+    esac
+
     local got=""
     local attempt
     for attempt in 1 2 3; do
-        arm_reachable "$role" || rescue "$role" >/dev/null 2>&1 || true
+        if ! arm_reachable "$role"; then
+            rescue "$role" >/dev/null 2>&1 || true
+            if ! arm_reachable "$role"; then
+                die "$role: the debug port does not answer.
 
-        # Reset, wait and halt in ONE session: the window is what matters. Two
-        # sessions leave the image running for however long openocd takes to
-        # relaunch -- most of a second -- and that is ample for the master to
-        # start scanning out video. DispHSTX's DMA then keeps running through
-        # the rescue and fights openocd for SRAM, which surfaces as "Could not
-        # load data into target bounce buffer" and a half-erased flash: the chip
-        # boots nothing, wedges, and every later step reports some other
-        # problem instead. 30 ms is far more than the ROM needs to latch
-        # PACKAGE_SEL and far less than any image needs to bring up a display.
-        oocd "$role" "init" "reset run" "sleep 30" "halt" "exit" >/dev/null 2>&1 || true
+       This is not something the tooling can clear: rescue_reset needs a
+       working DP to run at all. Hold BOOTSEL on the $role half and power the
+       board on, then re-run."
+            fi
+        fi
 
-        # The target is left halted, so the gap before the next session costs
-        # nothing: the image is stopped 30 ms in and stays stopped.
+        oocd "$role" "init" "reset run" "sleep $settle_ms" "halt" "exit" \
+            >/dev/null 2>&1 || true
+
         got="$(read_word "$role" "$SYSINFO_PACKAGE_SEL" 2>/dev/null || true)"
         [ -n "$got" ] && break
         echo "    $role did not answer (attempt $attempt); rescuing" >&2

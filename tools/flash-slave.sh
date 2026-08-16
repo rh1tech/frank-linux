@@ -9,6 +9,8 @@
 #   0x10000000  afboot-rp2350          the bootloader, up to 512 kB
 #   0x100f0000  DTB    + 8-byte header
 #   0x10100000  Image  + 8-byte header
+#   0x10800000  rootfs.romfs           raw, no header -- the kernel reads it in
+#                                      place through MTD, so nothing copies it
 #
 # The header is magic ("FRPL") and a length. Without a length the bootloader
 # would have to copy the whole flash window into PSRAM and hope; with it, it
@@ -30,6 +32,10 @@ TIMEOUT="${SLAVE_TIMEOUT:-120}"
 
 DTB_ADDR=0x100f0000
 KERNEL_ADDR=0x10100000
+# Matches the "rootfs" partition in the device tree. Written raw: this one is
+# never copied anywhere, the kernel maps it where it lies.
+ROMFS_ADDR=0x10800000
+ROMFS=build/core2-slave/rootfs.romfs
 
 [ -f "$BOOT" ] || die "no $BOOT -- run tools/build-afboot.sh"
 KERNEL="$IMAGES/Image"
@@ -60,7 +66,10 @@ echo "==> flashing slave"
 ./tools/flash.sh slave "$BOOT" >/dev/null
 ./tools/flash.sh slave "build/payload/dtb.bin@$DTB_ADDR" >/dev/null
 ./tools/flash.sh slave "build/payload/kernel.bin@$KERNEL_ADDR" >/dev/null
-echo "    bootloader + dtb + kernel written"
+if [ -f "$ROMFS" ]; then
+    ./tools/flash.sh slave "$ROMFS@$ROMFS_ADDR" >/dev/null
+fi
+echo "    bootloader + dtb + kernel${ROMFS:+ + romfs} written"
 
 # Reset first, then attach.
 #
