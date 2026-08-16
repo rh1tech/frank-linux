@@ -134,10 +134,15 @@ BR2_PACKAGE_NANO=y
 
 # Midnight Commander, with ncurses rather than slang and no subshell.
 #
-# The subshell is the part that genuinely needs fork(): mc keeps a real shell
-# alive behind the panels and talks to it, which cannot be done by exec'ing
-# something once. Without it the panels, the internal viewer and the internal
-# editor all still work, and that is what mc is wanted for here.
+# The subshell is off because it has not been ported, not because it cannot be:
+# mc's subshell child execs a shell after nothing but syscalls, and would work
+# under vfork if it did not allocate first. See the note in mc.mk, carried by
+# buildroot-patches/0003. Background file operations are the part that really
+# does need a copy of a running mc, and they stay off.
+#
+# Without either, the panels, the internal viewer and the internal editor all
+# work, external commands run through posix_spawn, and so do the popen-based
+# paths -- which is what mc is wanted for here.
 #
 # It lands in flash rather than RAM, which is what makes it affordable at all --
 # mc plus glib is several MB, and on an 8 MB machine that is the whole budget if

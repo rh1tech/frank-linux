@@ -7,7 +7,9 @@ package needs fork() to do the thing it is wanted for here.
 mc is a file manager with an internal editor and viewer. Built --without-subshell
 it browses, copies, views and edits without creating a process at all; the fork
 sites are the subshell, the "execute this file" path, and the extfs helpers that
-read archives. glib is pulled in as a utility library -- lists, strings, UTF-8 --
+read archives -- and of those, only background file operations genuinely need a
+copy of a running mc. The subshell's child execs a shell after nothing but
+syscalls; see the note in mc.mk for what actually stands in its way. glib is pulled in as a utility library -- lists, strings, UTF-8 --
 and its fork() lives in gspawn.c, which mc only reaches through those same
 paths.
 
@@ -62,29 +64,39 @@ index ac512116..457a8d0d 100644
  	depends on !BR2_TOOLCHAIN_HAS_THREADS || !BR2_USE_WCHAR
 -	depends on BR2_USE_MMU
 diff --git a/package/mc/mc.mk b/package/mc/mc.mk
-index 9401b8a1..30c5a2d5 100644
+index 9401b8a1..48015674 100644
 --- a/package/mc/mc.mk
 +++ b/package/mc/mc.mk
-@@ -10,6 +10,28 @@ MC_SITE = http://ftp.midnight-commander.org
+@@ -10,6 +10,38 @@ MC_SITE = http://ftp.midnight-commander.org
  MC_LICENSE = GPL-3.0+
  MC_LICENSE_FILES = COPYING
  MC_DEPENDENCIES = libglib2 host-pkgconf $(TARGET_NLS_DEPENDENCIES)
 +# Two groups of things this board cannot have.
 +#
 +# Needs a copy of a running mc, which NOMMU cannot make:
-+#   --without-subshell    mc keeps a real shell alive behind the panels and
-+#                         talks to it over a pty. That cannot be expressed as
-+#                         "exec something once", so it is the one feature that
-+#                         genuinely requires fork().
-+#   --disable-background  file operations that continue in a second copy of mc.
++#   --disable-background  file operations that continue in a second copy of mc,
++#                         which goes on executing mc code rather than exec'ing
++#                         anything. That is the case fork() exists for.
 +#
 +# Needs a network, which this kernel does not have at all:
 +#   --disable-vfs-ftp --disable-vfs-shell
 +#
++# And one that is off because it has not been done, not because it cannot be:
++#   --without-subshell    mc keeps a real shell alive behind the panels over a
++#                         pty. init_subshell_child() does setsid, TIOCSCTTY,
++#                         tcsetattr, chdir and then execl's the shell -- all
++#                         syscalls, and after the exec it needs nothing of mc.
++#                         vfork() would serve. What stops it is that the child
++#                         allocates before the exec (putenv(g_strdup(...)), and
++#                         mc_config_get_full_path() on the bash path), and under
++#                         vfork the heap is the parent's. Hoisting those into
++#                         the parent would make a subshell possible here.
++#
 +# Everything else stays: the panels, the internal viewer and editor, find-file,
 +# and the tar and cpio filesystems, which mc reads in-process rather than by
-+# running a helper. External programs still work -- my_systemv() execs them
-+# through posix_spawn (br-external/patches/mc/0001).
++# running a helper. External programs work -- my_systemv() execs them through
++# posix_spawn (br-external/patches/mc/0001) -- and so do the popen-based paths,
++# because uClibc's popen() already uses vfork().
 +MC_CONF_OPTS += \
 +	--without-subshell \
 +	--disable-background \

@@ -22,8 +22,10 @@ they existed only to describe the shape of that fork, and leaving them behind
 is a -Wunused-function warning and a reader wondering which path is live.
 
 my_fork() itself stays, and fails with ENOSYS. The remaining callers are the
-subshell and background file operations, both of which need a genuine copy of a
-running mc and are configured out (--without-subshell, --disable-background).
+subshell and background file operations, both configured out. Only background
+operations genuinely need a copy of a running mc -- the subshell's child execs
+a shell after nothing but syscalls and would work under vfork, if it did not
+allocate before the exec.
 Keeping the function means that anything reaching it by a route we did not
 anticipate stops there, visibly, rather than running.
 
