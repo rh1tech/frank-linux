@@ -947,6 +947,39 @@ RAM-resident initramfs spends about 2 MB of the 8 MB permanently; from a block
 device it would be copied in per process, libc included, because a block-backed
 filesystem cannot be pointed at either.
 
+### Since: the root itself
+
+The above was measured with the romfs mounted at /mnt/rom alongside a
+RAM-resident initramfs, which is why libc is still coming from ramfs in that
+listing. The root is now the romfs, mounted straight off the MTD with
+`root=mtd:rootfs rootfstype=romfs ro`, and nothing is resident:
+
+```
+~ # cat /proc/self/maps
+10819000-1081e000 r-xp  /lib/ld-uClibc-1.0.52.so   <- 0x10.. is flash
+1081f000-10876000 r-xp  /lib/libuClibc-1.0.52.so
+1096e000-109ce000 r-xp  /bin/busybox
+11668000-11670000 rw-p  [stack]                    <- 0x11.. is RAM
+```
+
+`Memory: 5532K/8192K available`, against 4588K with the initramfs -- 944 kB
+back, and `Freeing unused kernel image (initmem) memory` down from 936K to 80K,
+because most of that 936K *was* the cpio.
+
+No block device is involved at any point, which is what preserves the direct
+mapping. Verified in the 6.15 source before the board was touched:
+`parse_root_device()` returns `Root_Generic` for anything starting "mtd";
+`mount_root_generic()` tries `root_fs_names` without a `FS_REQUIRES_DEV` check;
+`romfs_get_tree()` calls `get_tree_mtd()`, which matches "mtd:" against the
+partition label. It booted first try.
+
+The cost is a read-only root, which Buildroot's sysv skeleton does not expect
+and does not let you configure: `BR2_TARGET_GENERIC_REMOUNT_ROOTFS_RW` exists
+but only skeleton-init-systemd and skeleton-init-openrc read it. post-build.sh
+drops the `mount -o remount,rw /` line and rewrites tmpfs to ramfs in fstab --
+the latter having been failing silently all along, invisible only because the
+root was writable and the mount points were ordinary directories on it.
+
 ### Four things had to be right, and each failed silently
 
 **`MISC_FILESYSTEMS` was off**, inherited from mps2_defconfig. romfs lives under
