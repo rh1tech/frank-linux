@@ -19,7 +19,13 @@ stty rows 25 cols 80 2>/dev/null
 
 export PAGER=less
 export EDITOR=vi
-export PATH=/usr/local/bin:/usr/local/sbin:$PATH
+
+# The card goes last, after the flash. Everything in the image is executed in
+# place out of romfs and costs no RAM to run; anything on the card has to be
+# copied into memory first, because a FAT filesystem on a block device cannot
+# give the kernel a direct mapping. So when a program exists in both places, the
+# flash copy is the one you want.
+export PATH=$PATH:/mnt/sd/bin
 
 # Two lines so a wrapped command does not scroll the prompt off an 80x25 screen.
 export PS1='\w

@@ -84,7 +84,13 @@ fi
 if ! grep -qa "armv7ml" "$LOG"; then
     die "no command output came back to the screen (screen: logs/console-test.png)"
 fi
-if ! grep -qa "buildroot login" "$LOG"; then
-    die "no login prompt on screen (screen: logs/console-test.png)"
+# The banner, which getty renders from /etc/issue before the prompt. It is the
+# only part of the screen that comes from this project's own files rather than
+# from Buildroot's skeleton, so it is the part that proves the image on the
+# board is ours. It said "buildroot login" until the machine was given a name,
+# and this check went on passing on a stale assumption for exactly as long as
+# nothing changed.
+if ! grep -qa "FRANK Linux v" "$LOG" || ! grep -qa "frank login" "$LOG"; then
+    die "no FRANK banner or login prompt on screen (screen: logs/console-test.png)"
 fi
 echo "PASS  Phase 6: a shell on HDMI, answering the keyboard"

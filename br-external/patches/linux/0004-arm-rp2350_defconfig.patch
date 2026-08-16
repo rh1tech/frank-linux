@@ -25,7 +25,7 @@ stack is pure overhead in 8 MB.
 
 --- /dev/null
 +++ b/arch/arm/configs/rp2350_defconfig
-@@ -0,0 +1,156 @@
+@@ -0,0 +1,162 @@
 +CONFIG_NO_HZ_IDLE=y
 +CONFIG_HIGH_RES_TIMERS=y
 +CONFIG_PREEMPT_VOLUNTARY=y
@@ -75,6 +75,12 @@ stack is pure overhead in 8 MB.
 +CONFIG_MTD_OF_PARTS=y
 +CONFIG_ROMFS_FS=y
 +CONFIG_ROMFS_BACKED_BY_MTD=y
++
++# No initrd. The root is the romfs above, mounted straight off the MTD by
++# root=mtd:rootfs, so there is nothing for an initramfs to do except hold a
++# second copy of the same files in RAM -- which is what this did until the
++# flash partition existed, and cost 1.1 MB of the machine's 8.
++# CONFIG_BLK_DEV_INITRD is not set
 +
 +# No tmpfs: TMPFS depends on SHMEM, and SHMEM depends on MMU. /tmp and /var get
 +# ramfs instead, which is the NOMMU substitute -- same idea, no swap, and no

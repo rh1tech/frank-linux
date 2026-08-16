@@ -66,8 +66,21 @@ BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_FRANK_LINUX_PATH)/patches"
 # lives in one place rather than being duplicated as a literal here.
 BR2_TARGET_GENERIC_HOSTNAME="frank"
 
-# Userspace: BusyBox in an initramfs the kernel carries itself.
-BR2_TARGET_ROOTFS_INITRAMFS=y
+# Userspace: BusyBox in a romfs in flash, mounted as root and executed in place.
+#
+# Not an initramfs. That is the obvious choice on a machine with no storage and
+# it is what this used to do, but it means the kernel unpacks the whole rootfs
+# into RAM at boot and then never gives it back -- on a board with 8 MB, 1.1 MB
+# of it spent holding a second copy of files that are already in flash.
+#
+# romfs on an MTD hands the same files back as a direct mapping instead, so a
+# binary's text is fetched from flash as it executes and occupies no RAM at all.
+# 384 kB of BusyBox costs nothing to run. See post-image.sh for how the image is
+# built and 0004's ROMFS block for what the kernel needs to mount it.
+#
+# The cost is that the root is read-only, which the skeleton is not expecting;
+# post-build.sh adjusts inittab and fstab for it.
+# BR2_TARGET_ROOTFS_INITRAMFS is not set
 # BR2_TARGET_ROOTFS_TAR is not set
 
 # Wide characters, which is a toolchain rebuild rather than a package option.

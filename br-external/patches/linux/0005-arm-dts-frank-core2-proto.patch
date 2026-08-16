@@ -119,7 +119,7 @@ core 1 stack.
 +};
 --- /dev/null
 +++ b/arch/arm/boot/dts/frank/frank-core2-proto-slave.dts
-@@ -0,0 +1,89 @@
+@@ -0,0 +1,106 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * FRANK Core 2 Proto, slave half (U6, RP2350A) -- the half that runs Linux.
@@ -135,7 +135,24 @@ core 1 stack.
 +	compatible = "frank,core2-proto-slave", "raspberrypi,rp2350";
 +
 +	chosen {
-+		bootargs = "earlycon console=ttyFRK0";
++		/*
++		 * root=mtd:rootfs, by name rather than mtd3, so renumbering the
++		 * partitions above cannot silently boot the wrong one.
++		 *
++		 * The kernel routes this without a block device: parse_root_device()
++		 * returns Root_Generic for anything starting "mtd", and romfs
++		 * mounts the MTD directly (ROMFS_BACKED_BY_MTD). That is the whole
++		 * point -- romfs on an MTD that can be pointed at gives every
++		 * binary a direct mapping of flash, so the text is executed in
++		 * place and costs no RAM. Through a block device it would be read
++		 * into page cache instead, and on 8 MB that is the difference
++		 * between running and not.
++		 *
++		 * rootfstype is needed because Root_Generic mounts by name; ro
++		 * because romfs has no write path and saying so keeps the failure
++		 * at mount time rather than on the first write.
++		 */
++		bootargs = "earlycon console=ttyFRK0 root=mtd:rootfs rootfstype=romfs ro";
 +		stdout-path = &console;
 +	};
 +

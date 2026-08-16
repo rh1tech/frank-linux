@@ -1,0 +1,48 @@
+#!/bin/sh
+#
+# Mount the microSD card, which lives on the other RP2350 and arrives over the
+# PIO link as /dev/frankblk0.
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# READ-ONLY, deliberately. This is a real card with a real filesystem on it, and
+# the root filesystem is in flash, so nothing here needs the card to be
+# writable. Mounting it rw by default would put the user's data one buggy write
+# path away from being destroyed, in exchange for nothing. Remount by hand when
+# you actually mean to write:
+#
+#     mount -o remount,rw /mnt/sd
+#
+# Failure is not an error. The card is optional -- the machine boots and runs
+# entirely from flash without it -- so a missing or unformatted card should say
+# so once and get out of the way, not fail a boot.
+
+DEV=/dev/frankblk0p1
+DIR=/mnt/sd
+
+case "$1" in
+	start)
+		printf 'Mounting the SD card: '
+		if [ ! -b "$DEV" ]; then
+			echo "no card"
+			exit 0
+		fi
+		if mount -o ro "$DEV" "$DIR" 2>/dev/null; then
+			echo "OK (read-only, at $DIR)"
+		else
+			echo "unreadable -- unformatted, or not FAT"
+		fi
+		;;
+	stop)
+		# Read-only, so there is nothing to flush; this only keeps the
+		# block layer from complaining at shutdown.
+		umount "$DIR" 2>/dev/null
+		;;
+	restart|reload)
+		"$0" stop
+		"$0" start
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart}"
+		exit 1
+esac

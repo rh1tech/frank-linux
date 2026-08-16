@@ -87,6 +87,48 @@ else
     echo "post-build: no version.txt at $VERSION_FILE; leaving /etc/issue alone" >&2
 fi
 
+# Make the skeleton survive a read-only root.
+#
+# The rootfs is romfs in flash, executed in place. Buildroot's sysv skeleton
+# assumes it can write to the root, and does so in two places that both fail
+# here. Neither is configurable: BR2_TARGET_GENERIC_REMOUNT_ROOTFS_RW exists but
+# only skeleton-init-systemd and skeleton-init-openrc read it, so for busybox
+# init the line below is unconditional in the shipped inittab.
+#
+#   1. `mount -o remount,rw /` -- prints an error on every boot and cannot ever
+#      succeed. romfs has no write path at all.
+#
+#   2. tmpfs for /tmp, /run and /dev/shm. TMPFS depends on SHMEM depends on MMU,
+#      so it does not exist in this kernel, and `mount -a` skips all three. That
+#      is invisible today only because the root is a writable initramfs and the
+#      mount points are ordinary directories on it. On romfs they are read-only,
+#      which takes /var with them -- Buildroot points var/log, var/spool,
+#      var/cache and var/tmp at ../tmp.
+#
+# ramfs is the substitute: always built in, since it is what rootfs itself is on
+# a kernel without SHMEM. It keeps the mode= option the /tmp and /dev/shm lines
+# rely on, and drops only size=, which nothing here sets. That is the real cost:
+# nothing bounds /tmp except the 8 MB the machine has.
+#
+# Both the device and the type column say "tmpfs", so this replaces the word
+# wherever it appears rather than anchoring to the start of the line.
+sed -i '/mount -o remount,rw \//d' "$TARGET_DIR/etc/inittab"
+sed -i 's/\btmpfs\b/ramfs/g' "$TARGET_DIR/etc/fstab"
+echo "post-build: inittab/fstab adjusted for a read-only root"
+
+# seedrng keeps its seed in /var/lib/seedrng, the one part of /var that is a
+# real directory rather than a symlink into /tmp. It is written to fail quietly,
+# so this only saves a confusing message; the seed is not persistent either way,
+# because /tmp does not survive a reboot. Persisting it would mean writing to
+# the SD card on every boot, which is not worth it for a machine with no clock
+# and no network.
+mkdir -p "$TARGET_DIR/etc/default"
+printf 'SEEDRNG_ARGS="--seed-dir=/tmp/seedrng --skip-credit"\n' \
+    > "$TARGET_DIR/etc/default/seedrng"
+
+# Mount points have to exist in the image: nothing can mkdir on a read-only root.
+mkdir -p "$TARGET_DIR/mnt/sd"
+
 # Build the MPU probe into the image.
 #
 # It has to be cross-compiled and it is one file, so a full Buildroot package
