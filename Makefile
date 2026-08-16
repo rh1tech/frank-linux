@@ -224,8 +224,12 @@ slave-kernel-rebuild: volumes
 
 # Run what CI runs, before pushing. CI failed for six commits on three unused
 # shell variables, which is exactly the kind of thing worth catching locally.
+# -S style so this fails on everything CI fails on. Homebrew ships a newer
+# shellcheck than the runner does and is quieter by default, which is how three
+# SC2015s got past a clean local run.
 lint:
-	@shellcheck -e SC1091 tools/*.sh .githooks/commit-msg && echo "shellcheck clean"
+	@shellcheck -S style -e SC1091 tools/*.sh .githooks/commit-msg \
+		&& echo "shellcheck clean"
 
 # --------------------------------------- kernel source access ---------------
 # The kernel tree lives inside the build volume, not in the repo. This copies a

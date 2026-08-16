@@ -49,7 +49,9 @@ echo "==> reading the MPU registers over SWD"
 regs="$(oocd slave "init" "halt" "mdw $MPU_TYPE 1" "mdw $MPU_CTRL 1" "exit" 2>/dev/null)"
 mtype="$(sed -n "s/^$MPU_TYPE: *//p" <<<"$regs" | tr -d '\r' | awk '{print $1}')"
 mctrl="$(sed -n "s/^$MPU_CTRL: *//p" <<<"$regs" | tr -d '\r' | awk '{print $1}')"
-[ -n "$mtype" ] && [ -n "$mctrl" ] || die "could not read the MPU registers"
+if [ -z "$mtype" ] || [ -z "$mctrl" ]; then
+    die "could not read the MPU registers"
+fi
 regions=$(( (0x$mtype >> 8) & 0xff ))
 echo "    MPU_TYPE=0x$mtype ($regions regions), MPU_CTRL=0x$mctrl"
 
@@ -66,7 +68,9 @@ for n in $(seq 0 $((regions - 1))); do
                 "mdw $MPU_RBAR 1" "mdw $MPU_RLAR 1" "exit" 2>/dev/null)"
     rbar="$(sed -n "s/^$MPU_RBAR: *//p" <<<"$out" | tr -d '\r' | awk '{print $1}')"
     rlar="$(sed -n "s/^$MPU_RLAR: *//p" <<<"$out" | tr -d '\r' | awk '{print $1}')"
-    [ -n "$rbar" ] && [ -n "$rlar" ] || continue
+    if [ -z "$rbar" ] || [ -z "$rlar" ]; then
+        continue
+    fi
     [ $(( 0x$rlar & 1 )) -eq 1 ] || continue          # region disabled
     [ $(( (0x$rbar >> 1) & 3 )) -eq 0 ] || continue   # AP != PL1-only
     base=$(( 0x$rbar & 0xffffffe0 ))
@@ -92,7 +96,9 @@ for n in $(seq 0 $((regions - 1))); do
                 "mdw $MPU_RBAR 1" "mdw $MPU_RLAR 1" "exit" 2>/dev/null)"
     rbar="$(sed -n "s/^$MPU_RBAR: *//p" <<<"$out" | tr -d '\r' | awk '{print $1}')"
     rlar="$(sed -n "s/^$MPU_RLAR: *//p" <<<"$out" | tr -d '\r' | awk '{print $1}')"
-    [ -n "$rbar" ] && [ -n "$rlar" ] || continue
+    if [ -z "$rbar" ] || [ -z "$rlar" ]; then
+        continue
+    fi
     [ $(( 0x$rlar & 1 )) -eq 1 ] || continue
     ap=$(( (0x$rbar >> 1) & 3 ))
     xn=$(( 0x$rbar & 1 ))
