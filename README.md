@@ -275,6 +275,14 @@ before a single line of the port had been written.
 - **The USB HID path is not machine-tested.** A keyboard enumerates and the
   harness types through the identical path from `terminal_feed_event()` onward,
   but nothing here can press a physical key.
+- **libffi does not work, and glib is built on top of that.** libffi has no
+  Cortex-M port — its ARM backend is A32 assembly with VFP spelled as
+  coprocessor instructions, neither of which exists on M-profile — so here it
+  builds as a library whose entry points return `FFI_BAD_ABI`. Nothing in this
+  image calls it: glib needs it only for GObject's generic closure marshaller,
+  and mc uses `glib-2.0` and `gmodule-2.0` without touching GObject. Any future
+  package that does use GObject signals will find out by return value, which is
+  the best that could be arranged short of doing the port.
 - **Nothing bounds `/tmp`.** The root is read-only romfs, so `/tmp`, `/run` and
   `/var` are ramfs — `tmpfs` needs `SHMEM`, which needs an MMU. ramfs takes no
   `size=`, so a runaway write to `/tmp` consumes the machine's whole 8 MB.
