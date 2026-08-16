@@ -1,0 +1,147 @@
+ARM: dts: add the FRANK Core 2 Proto slave device tree
+
+In-tree under arch/arm/boot/dts/frank/ rather than supplied as a loose file.
+Buildroot's custom-DTS path drops files straight into arch/arm/boot/dts/, and
+since the per-vendor reorganisation there is no rule to build them there:
+
+  make[3]: *** No rule to make target 'arch/arm/boot/dts/frank-core2-proto-slave.dtb'
+
+The tree gives Linux the 8 MB of external PSRAM and no SRAM at all. That 520 kB
+holds core 1's code, its stack and the console rings; listing it as memory would
+let the kernel allocate on top of them. It is also the only region where
+LDREX/STREX work, which is why core 1's structures live there and the kernel's
+do not.
+
+The console node is at 0x2007e000 -- the top of *main* SRAM, deliberately not
+the 0x20080000 that looks like the top of SRAM and is actually SCRATCH_X, the
+core 1 stack.
+
+--- a/arch/arm/boot/dts/Makefile
++++ b/arch/arm/boot/dts/Makefile
+@@ -12,6 +12,7 @@
+ subdir-y += calxeda
+ subdir-y += cirrus
+ subdir-y += cnxt
++subdir-y += frank
+ subdir-y += gemini
+ subdir-y += hisilicon
+ subdir-y += hpe
+--- /dev/null
++++ b/arch/arm/boot/dts/frank/Makefile
+@@ -0,0 +1,2 @@
++# SPDX-License-Identifier: GPL-2.0
++dtb-$(CONFIG_ARCH_RP2350) += frank-core2-proto-slave.dtb
+--- /dev/null
++++ b/arch/arm/boot/dts/frank/rp2350.dtsi
+@@ -0,0 +1,74 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Raspberry Pi RP2350, Arm side.
++ *
++ * Copyright (c) 2026 Mikhail Matveev <xtreme@rh1.tech>
++ *
++ * Addresses confirmed on hardware rather than transcribed; see
++ * docs/hw-findings.md.
++ */
++
++/ {
++	#address-cells = <1>;
++	#size-cells = <1>;
++	compatible = "raspberrypi,rp2350";
++
++	cpus {
++		#address-cells = <1>;
++		#size-cells = <0>;
++
++		cpu@0 {
++			device_type = "cpu";
++			compatible = "arm,cortex-m33";
++			reg = <0>;
++		};
++	};
++
++	/*
++	 * The NVIC. Mainline drives this directly, which is one of the reasons
++	 * the Arm side was worth taking: the RISC-V port had to invent an
++	 * interrupt controller and patch it in.
++	 */
++	nvic: interrupt-controller@e000e100 {
++		compatible = "arm,armv7m-nvic";
++		interrupt-controller;
++		#interrupt-cells = <1>;
++		reg = <0xe000e100 0xc00>;
++		arm,num-irq-priority-bits = <4>;
++	};
++
++	soc {
++		#address-cells = <1>;
++		#size-cells = <1>;
++		compatible = "simple-bus";
++		ranges;
++
++		/*
++		 * TIMER0: 64-bit, 1 MHz, four alarms. Alarm 0 is the kernel
++		 * tick; the other three are left for core 1. ARMV7M_SYSTICK
++		 * would only give a clocksource, and the kernel needs a
++		 * clockevent too.
++		 */
++		timer0: timer@400b0000 {
++			compatible = "raspberrypi,rp2350-timer";
++			reg = <0x400b0000 0x100>;
++			interrupts = <0>;
++			interrupt-parent = <&nvic>;
++			clock-frequency = <1000000>;
++		};
++
++		/*
++		 * The console. Not a UART: core 1 runs a TinyUSB CDC device and
++		 * moves bytes through two rings in SRAM, because the RP2350's
++		 * USB controller has no Linux driver.
++		 *
++		 * 0x2007e000 is the top of *main* SRAM. Deliberately not
++		 * 0x20080000, which looks like the top of SRAM and is actually
++		 * SCRATCH_X -- core 1's stack (hw-findings F13).
++		 */
++		console: ring-console@2007e000 {
++			compatible = "frank,ring-console";
++			reg = <0x2007e000 0x1020>;
++		};
++	};
++};
+--- /dev/null
++++ b/arch/arm/boot/dts/frank/frank-core2-proto-slave.dts
+@@ -0,0 +1,34 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * FRANK Core 2 Proto, slave half (U6, RP2350A) -- the half that runs Linux.
++ *
++ * Copyright (c) 2026 Mikhail Matveev <xtreme@rh1.tech>
++ */
++
++/dts-v1/;
++#include "rp2350.dtsi"
++
++/ {
++	model = "FRANK Core 2 Proto (RP2350A slave)";
++	compatible = "frank,core2-proto-slave", "raspberrypi,rp2350";
++
++	chosen {
++		bootargs = "earlycon console=ttyFRK0";
++		stdout-path = &console;
++	};
++
++	/*
++	 * System RAM is the 8 MB of external PSRAM at the QMI chip-select 1
++	 * window, and nothing else.
++	 *
++	 * The 520 kB of internal SRAM is deliberately absent. It belongs to
++	 * core 1 -- its code, its stack and the console rings -- and listing it
++	 * here would let the kernel allocate on top of them. It is also the one
++	 * region where LDREX/STREX work, which is why core 1's structures live
++	 * there and the kernel's do not.
++	 */
++	memory@11000000 {
++		device_type = "memory";
++		reg = <0x11000000 0x800000>;
++	};
++};

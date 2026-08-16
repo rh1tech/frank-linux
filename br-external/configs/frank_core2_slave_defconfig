@@ -42,7 +42,10 @@ BR2_LINUX_KERNEL_DEFCONFIG="rp2350"
 BR2_LINUX_KERNEL_IMAGE=y
 
 BR2_LINUX_KERNEL_DTS_SUPPORT=y
-BR2_LINUX_KERNEL_CUSTOM_DTS_PATH="$(BR2_EXTERNAL_FRANK_LINUX_PATH)/board/frank/core2-proto/dts/frank-core2-proto-slave.dts"
+# In-tree, added by patch 0005. Buildroot's custom-DTS path copies files to
+# arch/arm/boot/dts/ where, since the per-vendor reorganisation, nothing knows
+# how to build them.
+BR2_LINUX_KERNEL_INTREE_DTS_NAME="frank/frank-core2-proto-slave"
 BR2_GLOBAL_PATCH_DIR="$(BR2_EXTERNAL_FRANK_LINUX_PATH)/patches"
 
 # Userspace: BusyBox in an initramfs the kernel carries itself.
