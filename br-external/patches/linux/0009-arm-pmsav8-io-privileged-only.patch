@@ -1,0 +1,40 @@
+ARM: pmsa-v8: do not give user mode access to every peripheral
+
+pmsav8_setup_io() maps everything that is not system RAM with
+PMSAv8_AP_PL1RW_PL0RW, so a user process can read and write any peripheral in
+the address space. On an SoC whose debug and access-control blocks live there,
+a single stray store can disable the debug port until the next power-on -- the
+board keeps running and simply stops answering SWD, which is a long way from
+looking like a userspace bug.
+
+A stack overflow in an editor is enough to do it.
+
+Nothing legitimate depends on the old behaviour: userspace reaches peripherals
+through the kernel, which runs at PL1, and /dev/mem is served by the kernel.
+
+Signed-off-by: Mikhail Matveev <xtreme@rh1.tech>
+
+--- a/arch/arm/mm/pmsa-v8.c
++++ b/arch/arm/mm/pmsa-v8.c
+@@ -215,7 +215,20 @@
+ 	bar = start;
+ 	lar = (end - 1) & ~(PMSAv8_MINALIGN - 1);
+ 
+-	bar |= PMSAv8_AP_PL1RW_PL0RW | PMSAv8_RGN_SHARED | PMSAv8_BAR_XN;
++	/*
++	 * Privileged only.
++	 *
++	 * This used to be PL1RW_PL0RW, which hands user mode read-write access to
++	 * every peripheral on the chip -- on this SoC that includes the debug and
++	 * access-control blocks, so one wild store from a user process can disable
++	 * the debug port until the next power-on. A stack-overflowing editor is
++	 * enough; the symptom is a board that stops answering SWD while it carries
++	 * on running perfectly.
++	 *
++	 * Nothing legitimate needs it. Userspace reaches peripherals through the
++	 * kernel, which runs at PL1, and /dev/mem is served by the kernel too.
++	 */
++	bar |= PMSAv8_AP_PL1RW_PL0NA | PMSAv8_RGN_SHARED | PMSAv8_BAR_XN;
+ 	lar |= PMSAv8_LAR_IDX(PMSAv8_RGN_DEVICE_nGnRnE) | PMSAv8_LAR_EN;
+ 
+ 	return __pmsav8_setup_region(number, bar, lar);

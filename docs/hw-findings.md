@@ -819,6 +819,59 @@ stall it, while block requests can still wait seconds for a busy card.
 
 Every one of these presented as silence somewhere unrelated to its cause.
 
+## F26. The slave's debug port dies when our image runs, and I have not found why
+
+Reproducible, and the shape of it is precise:
+
+| state | SWD |
+|---|---|
+| BOOTSEL (ROM running) | answers, `DPIDR 0x4c013477` |
+| our image running | `cannot read IDR`, at 4000/1000/200 kHz |
+| after `reboot -f` (soft reset) | still dead |
+| after power-on | alive again |
+
+Meanwhile the chip is fine: Linux boots, the console answers, `yes` spins, XIP
+works. Only the debug port is gone. The master, running our firmware all
+evening, is unaffected.
+
+Dead ends, each tested rather than reasoned about:
+
+- **not the adapter** -- three clock speeds, `SWD_MULTIDROP`, RISC-V target set,
+  `connect_assert_srst`, the rescue DP, an SRST pulse
+- **not stray processes** holding the probe
+- **not core idle / deep sleep** -- `yes > /dev/null` spinning, still dead
+- **not the wiring** -- the SWD nets are local to each half, chip to J3, nothing
+  else on them, nothing the master drives
+- **not user access to peripherals** -- `pmsav8_setup_io()` mapped everything
+  PL0 read-write, so a stray user store could reach the debug and access-control
+  blocks. Patch 0009 makes those regions privileged-only. It did not fix this.
+
+Patch 0009 stays regardless: handing user mode read-write access to every
+peripheral on the SoC is wrong on its own terms.
+
+That the state survives a soft reset and clears only on power-on means it is
+latched -- a power domain or a sticky register, set once. Bisecting afboot
+against Linux therefore needs a power cycle per attempt, which is why this is
+recorded rather than solved.
+
+**The practical consequence matters more than the cause.** Every gate flashes
+through SWD, so a dead debug port stops the project. The answer is to stop
+depending on it: `picotool` can write flash through the ROM bootloader, and the
+firmware can expose the vendor interface that lets `picotool reboot -f` reach
+that bootloader from any state -- no SWD, no button. See F27.
+
+### Two tooling faults this exposed
+
+`rescue()` could never have worked. `rescue_reset` in rp2350.cfg calls `init`,
+and `init` needs a working DP -- so every "rescuing..." message printed during a
+dead port was noise, and the recoveries came from power cycles. It now says
+plainly that BOOTSEL is required.
+
+`assert_half` halted the image 30 ms after reset, to stop the master's video DMA
+fighting the flash write (F19). On the slave that lands inside `psram_init()`'s
+QMI reconfiguration. The window is per-role now with the reason written next to
+each number -- though it turned out not to be the cause of this.
+
 ## F25. Execute-in-place from flash: 384 kB of program text for no RAM
 
 ```

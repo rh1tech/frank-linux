@@ -38,6 +38,7 @@
 #include "hardware/clocks.h"
 #include "hardware/structs/qmi.h"
 #include "hardware/vreg.h"
+#include "pico/bootrom.h"
 #include "pico/stdlib.h"
 
 #include "frank_ring.h"
@@ -321,8 +322,42 @@ static void __attribute__((noreturn)) enter_kernel(uint32_t entry, uint32_t dtb)
     __builtin_unreachable();
 }
 
+/*
+ * Enter the ROM's USB bootloader if Linux asked for it.
+ *
+ * The board's only recovery from a wedged debug port used to be holding BOOTSEL
+ * while powering on -- a physical act, which makes the whole flash-and-test loop
+ * depend on somebody being in the room. And a wedged debug port is not
+ * hypothetical here: one stray store from user mode into the peripheral window
+ * disables it until the next power-on, and openocd then reports "cannot read
+ * IDR" on a chip that is otherwise running perfectly.
+ *
+ * So: Linux writes a magic word into SRAM and resets. SRAM survives a warm
+ * reset, this runs before anything else, and the ROM's USB bootloader comes up
+ * -- after which picotool can write flash without SWD being involved at all.
+ *
+ * The word is cleared before entering, so an interrupted attempt cannot leave
+ * the board permanently in the bootloader.
+ */
+#define BOOTSEL_REQUEST_ADDR  0x2007dffcu
+#define BOOTSEL_REQUEST_MAGIC 0xb0075e1fu
+
+static void check_bootsel_request(void)
+{
+    volatile uint32_t *slot = (volatile uint32_t *)BOOTSEL_REQUEST_ADDR;
+
+    if (*slot != BOOTSEL_REQUEST_MAGIC)
+        return;
+
+    *slot = 0;
+    __asm__ volatile("dsb" ::: "memory");
+    reset_usb_boot(0, 0);
+}
+
 int main(void)
 {
+    check_bootsel_request();
+
     clocks_bringup();
 
     /*
