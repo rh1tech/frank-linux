@@ -17,6 +17,13 @@ only path. What is left is to stop referring to fork() when it does not exist:
   - g_on_error_stack_trace() and g_on_error_query() report ENOSYS. Attaching a
     debugger to yourself needs a second process; these are developer aids, and
     saying so beats not linking.
+  - g_test_trap_fork(), deprecated since 2.38 in favour of the re-executing
+    g_test_trap_subprocess(), fails the way a failed fork() already fails there:
+    fatally, because a test that believed it forked and did not would run the
+    child's assertions in the parent.
+  - the GTestDBus watchdog takes its existing -1 arm, which warns. It exists to
+    make a leaked dbus-daemon die with the test process, and that genuinely
+    needs a second process outliving this one.
 
 Nothing changes on a system that has fork().
 
@@ -118,3 +125,47 @@ Upstream status: not submitted.
    if (pid == 0)
      {
        /* Save stderr for printing failure below */
+--- a/glib/gtestutils.c
++++ b/glib/gtestutils.c
+@@ -3941,8 +3941,19 @@
+       errsv = errno;
+       g_error ("failed to create pipes to fork test program: %s", g_strerror (errsv));
+     }
++#ifdef HAVE_FORK
+   test_trap_last_pid = fork ();
+   errsv = errno;
++#else
++  /* g_test_trap_fork() has been deprecated since 2.38 in favour of
++   * g_test_trap_subprocess(), which re-executes the test binary rather than
++   * duplicating the process -- and re-execution is the only thing available on
++   * a system without fork(). Report the failure the way a failed fork() is
++   * reported here, which is fatal: a test that believes it forked and did not
++   * would go on to run the child's assertions in the parent. */
++  test_trap_last_pid = -1;
++  errsv = ENOSYS;
++#endif
+   if (test_trap_last_pid < 0)
+     g_error ("failed to fork test program: %s", g_strerror (errsv));
+   if (test_trap_last_pid == 0)  /* child */
+--- a/gio/gtestdbus.c
++++ b/gio/gtestdbus.c
+@@ -262,7 +262,18 @@
+       fflush (stdout);
+       fflush (stderr);
+ 
+-      switch (fork ())
++      switch (
++#ifdef HAVE_FORK
++              fork ()
++#else
++              /* This watchdog exists so a leaked dbus-daemon dies with the
++               * test process. It needs a second process that outlives this
++               * one, which is what fork() is for and what re-execution cannot
++               * substitute for. The -1 arm below already handles not getting
++               * one. */
++              (errno = ENOSYS, -1)
++#endif
++              )
+         {
+         case -1:
+           errsv = errno;
