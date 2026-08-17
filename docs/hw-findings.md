@@ -819,6 +819,83 @@ stall it, while block requests can still wait seconds for a busy card.
 
 Every one of these presented as silence somewhere unrelated to its cause.
 
+## F30. Userspace atomics, by asking the kernel
+
+F29 concluded that threads were impossible here, and that was the wrong
+conclusion from the right evidence.
+
+The evidence stands: LDREX/STREX have no exclusive monitor covering PSRAM, so
+STREX never succeeds there and the compare-exchange retry loop in every uClibc
+mutex spins forever. Measured directly, with a hardware breakpoint placed after
+the pair so it ran at full speed rather than being single-stepped -- which
+clears the monitor and would have faked the result:
+
+```
+pc = 0x10586646   r0 = 1     <- STREX failed
+r2 = 2, r3 = 2               <- values match, so the loop repeats
+[rp2350.cm0] halted due to breakpoint, current mode: Thread (User)
+```
+
+Two escape routes were checked and closed. The compiler cannot be talked out of
+emitting exclusives: `-fno-inline-atomics` is a no-op on ARM, and
+`-march=armv6s-m`, which *would* emit libcalls, is refused outright --
+"FDPIC mode is not supported in Thumb-1 mode", and FDPIC is what gives this
+machine a shared libc. The MPU is already configured as well as it can be: the
+region holding the lock is Normal, Non-shareable, write-back, which by the
+architecture should use the core's local monitor.
+
+What was missed is that the kernel had already solved this problem for itself.
+CONFIG_ARM_NO_EXCLUSIVES builds kernel atomics out of raw_local_irq_save(),
+because a uniprocessor with interrupts masked is atomic. Userspace cannot mask
+interrupts -- but it can ask the kernel to.
+
+```
+linux 0010    __ARM_NR_cmpxchg: r0 expected, r1 new, r2 pointer.
+uclibc 0002   the ARM compare-exchange macro calls it on M-profile.
+libglib2      G_ATOMIC_LOCK_FREE off, and USE_NATIVE_MUTEX with it.
+```
+
+The libc side is one macro, because `include/atomic.h` builds every other
+atomic operation on `__arch_compare_and_exchange_val_32_acq` and exactly one
+file in the tree writes exclusives for this configuration: 696 sites, one choke
+point. Nor is the idea new to that file -- the two branches below the one added
+do the same for pre-ARMv6 cores via `__kuser_cmpxchg`, unavailable here only
+because it lives in the vectors page and that needs an MMU.
+
+The kernel half was tested before the toolchain was rebuilt, by calling the
+syscall directly from a userspace built without it:
+
+```
+CASTEST swap       ok -- returned 0, word now 0x22222222
+CASTEST no-swap    ok -- returned 1, word now 0x22222222
+CASTEST counter    ok -- 20000 increments -> 20000
+```
+
+The counter is the one that matters: STREX here stores while reporting failure,
+so a counter advanced only through the primitive is exactly what a broken one
+cannot get right.
+
+Afterwards: zero LDREX/STREX in libuClibc, down from 696, and Midnight Commander
+runs.
+
+### Two lessons, both about what a build system can see
+
+`cc.links()` and autoconf's equivalents answer the wrong question. glib decides
+whether its atomics are lock-free by checking whether a test program compiles
+and links -- and it does. The program is valid; it only fails by never
+terminating, and meson does not run test programs when cross-compiling. The same
+is true of `fork()`: the declaration is there, so the probe says yes.
+
+`tools/check-atomics.sh` exists because of that. It disassembles every ELF file
+in the target tree and fails if any still contains a compare-exchange sequence.
+It is the only check in the build that looks at the artifact rather than at a
+proxy for it, and it caught the glib half before the board did. It needed
+fixing twice itself -- once for running `docker run` without `-i`, so it checked
+nothing and passed, and once for counting LDREX or STREX alone, which matches
+jump-table bytes that objdump decodes as instructions.
+
+---
+
 ## F29. Userspace threads livelock on F6, and that ends Midnight Commander
 
 Midnight Commander needs glib, glib needs threads, and Buildroot offers threads
