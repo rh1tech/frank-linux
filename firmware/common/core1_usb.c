@@ -343,6 +343,30 @@ __attribute__((weak)) void frank_blk_service(void) { }
 void __not_in_flash_func(core1_usb_main)(void)
 {
     tusb_init();
+
+    /*
+     * Make the host notice we restarted.
+     *
+     * A warm reset over SWD does not disconnect USB: the pull-up stays
+     * asserted across `reset run`, so as far as the host is concerned the same
+     * device is still there. It keeps the old address and configuration, the
+     * newly started stack knows nothing about either, and the console node
+     * simply never comes back -- the device is enumerated and mute.
+     *
+     * That turned every warm reset of this half into a reflash, because
+     * reflashing is the only thing that happened to power-cycle the link into
+     * a state the host would re-enumerate. Eight minutes to recover from a
+     * two-second operation, and the symptom -- a board that boots but has no
+     * console -- looks exactly like a boot failure.
+     *
+     * 100 ms is comfortably longer than the 2.5 us the spec needs to see a
+     * disconnect, and it is paid once at start-up, where afboot is already
+     * waiting for the host anyway.
+     */
+    tud_disconnect();
+    sleep_ms(100);
+    tud_connect();
+
     frank_blk_init();
     for (;;) {
         service_once();
@@ -359,5 +383,6 @@ void __not_in_flash_func(core1_usb_main)(void)
 void frank_core1_usb_start(void)
 {
     frank_ring_init();
+
     multicore_launch_core1(core1_usb_main);
 }
