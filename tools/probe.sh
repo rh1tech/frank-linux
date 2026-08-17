@@ -25,7 +25,29 @@ PROBE_SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Measured directly: with the display running, examination fails every time at
 # 5000 and succeeds every time at 1000 and 200. The cost is a slower flash
 # write, which is worth it.
-: "${ADAPTER_SPEED:=1000}"
+#
+# But that measurement was taken on the *master*, and the interference is the
+# master's own HDMI: eight differential pairs switching at 252 MHz on
+# GPIO12..19. The slave drives no display, and its probe is a different device
+# on different wires, so the limit was never its. Measured on the slave, writing
+# and verifying the 2.2 MB kernel:
+#
+#   1000 kHz   33.0 KiB/s write, 41.2 KiB/s verify   130 s
+#   4000 kHz   54.5 KiB/s write, 58.9 KiB/s verify    84 s
+#   8000 kHz   60.9 KiB/s write, 62.1 KiB/s verify    78 s
+#
+# Verify passed every time, which is the check that matters: a marginal link
+# does not announce itself, it produces a write that verifies wrong (F20).
+#
+# 4000 rather than 8000. The gain from 4 to 8 is 8%, because at that point the
+# limit is openocd's chunked flash-loader protocol rather than the wire, and
+# there is no reason to spend the remaining margin on it.
+adapter_speed_for() {
+    case "$1" in
+        slave) echo 4000 ;;
+        *)     echo 1000 ;;
+    esac
+}
 
 # RP2350 SYSINFO, from the SDK's addressmap.h / sysinfo.h. Part of this file's
 # interface: scripts that source it read these, so shellcheck cannot see the use.
@@ -102,7 +124,7 @@ oocd() {
 
     local args=(-f interface/cmsis-dap.cfg
                 -c "adapter serial $serial"
-                -c "adapter speed $ADAPTER_SPEED")
+                -c "adapter speed ${ADAPTER_SPEED:-$(adapter_speed_for "$role")}")
     # USE_CORE and RESCUE have to be set before the target config is sourced;
     # both are read at parse time, not at init.
     [ -n "$OOCD_CORES" ] && args+=(-c "set USE_CORE { $OOCD_CORES }")

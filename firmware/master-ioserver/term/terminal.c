@@ -48,6 +48,16 @@ static int cursor_col = 0, cursor_row = 0, saved_col = 0, saved_row = 0;
 static int scroll_region_start, scroll_region_end;
 static bool cursor_shown = true, origin_mode = false, cursor_eol = false, auto_wrap_mode = true, vt52_mode = false, localecho = false;
 static bool saved_eol = false, saved_origin_mode = false, insert_mode = false;
+/*
+ * DECCKM, the application cursor key mode (ESC [ ? 1 h / l).
+ *
+ * Full-screen programs turn this on -- it is terminfo's smkx -- and then read
+ * arrow keys as ESC O A rather than ESC [ A. Without it they see a sequence
+ * they did not ask for and drop it, so the arrow keys silently do nothing.
+ * Midnight Commander is the case that found this: it emitted 287 bytes in
+ * response to ESC O B and exactly 0 to ESC [ B.
+ */
+static bool cursor_key_mode = false;
 static bool petscii_lower_case_charset = true;
 static uint8_t saved_attr, saved_fg, saved_bg, saved_charset_G0, saved_charset_G1, *charset, charset_G0, charset_G1, tabs[255];
 
@@ -212,6 +222,7 @@ void INFLASHFUN terminal_reset()
   cursor_eol = false;
   auto_wrap_mode = true;
   insert_mode = false;
+  cursor_key_mode = false;
   vt52_mode = false;
   attr = config_get_terminal_default_attr();
   saved_attr = 0;
@@ -338,6 +349,10 @@ static void INFLASHFUN terminal_process_command(char start_char, char final_char
         {
           switch( params[0] )
             {
+            case 1: // DECCKM - application cursor keys
+              cursor_key_mode = enabled;
+              break;
+
             case 2:
               if( !enabled ) { terminal_reset(); vt52_mode = true; }
               break;
@@ -368,10 +383,47 @@ static void INFLASHFUN terminal_process_command(char start_char, char final_char
               // Local echo is controlled by user configuration only
               // break;
               
-            case 25: // show/hide cursor
-              // Cursor visibility is controlled by user configuration only
-              // Remote applications should not control cursor visibility
-              // break;
+            case 1049:
+              /*
+                 Alternate screen buffer.
+
+                 Full-screen programs switch to it on start and back on exit, so
+                 that what was on the screen before survives. A second 80x25
+                 cell buffer is real memory on this part and the display engine
+                 reads from one framebuffer, so this does the part that matters
+                 and not the part that does not: save the cursor and clear on
+                 entry, clear and restore on exit.
+
+                 The consequence is that the shell's scrollback is not restored
+                 when mc exits -- the screen comes back empty rather than as it
+                 was. Ignoring 1049 entirely is worse: the program draws over
+                 whatever was there and leaves its own last frame behind.
+              */
+              if( enabled )
+                { terminal_process_command(0, 's', 0, NULL); terminal_clear_screen(); }
+              else
+                { terminal_clear_screen(); terminal_process_command(0, 'u', 0, NULL); }
+              break;
+
+            case 25: // DECTCEM - show/hide cursor
+              /*
+                 This used to be commented out, body and break alike, on the
+                 grounds that a remote application should not control the
+                 cursor. For a terminal serving a Linux console that is exactly
+                 backwards: civis/cnorm are how every full-screen program stops
+                 the cursor flickering around the screen while it redraws, and
+                 how it then puts the cursor where the user is actually working.
+                 Without it the hardware cursor sits wherever the last write
+                 happened to leave it, which is a stray block in the middle of
+                 Midnight Commander's panels.
+
+                 cursor_shown is the real state -- show_cursor() is a no-op
+                 here, because the cursor is drawn by the hardware text cursor
+                 from terminal_get_cursor().
+              */
+              cursor_shown = enabled;
+              show_cursor(cursor_shown);
+              break;
             }
         }
       else if( start_char==0 )
@@ -546,6 +598,19 @@ static void INFLASHFUN terminal_process_command(char start_char, char final_char
             }
           else if( p==1 )
             attr |= ATTR_BOLD;
+          else if( p==2 )
+            /* Dim. There is no half-bright attribute in a 16-colour cell, and
+               guessing a darker palette entry would make text vanish on some
+               backgrounds. Clearing bold is the honest approximation. */
+            attr &= ~ATTR_BOLD;
+          else if( p==3 )
+            /* Italic, which terminfo's smso uses for standout on this entry.
+               There is no italic here, and standout on a text display has
+               always meant inverse -- which is also what programs expect it to
+               look like. Midnight Commander draws its selection bar with it. */
+            attr |= ATTR_INVERSE;
+          else if( p==23 )
+            attr &= ~ATTR_INVERSE;
           else if( p==4 )
             attr |= ATTR_UNDERLINE;
           else if( p==5 )
@@ -560,6 +625,12 @@ static void INFLASHFUN terminal_process_command(char start_char, char final_char
             attr &= ~ATTR_BLINK;
           else if( p==27 )
             attr &= ~ATTR_INVERSE;
+          else if( p>=90 && p<=97 )
+            /* Bright foreground. The palette's upper eight entries are exactly
+               these, so no approximation is needed. */
+            color_fg = (p-90) + 8;
+          else if( p>=100 && p<=107 )
+            color_bg = (p-100) + 8;
           else if( p>=30 && p<=37 )
             color_fg = p-30;
           else if( p==38 && num_params>=i+2 && params[i+1]==5 )
@@ -1273,6 +1344,8 @@ static void INFLASHFUN send_cursor_sequence(char c)
 {
   if( config_get_terminal_type()==CFG_TTYPE_VT52 || vt52_mode )
     { send_char(27); send_char(c); }
+  else if( cursor_key_mode )
+    { send_char(27); send_char('O'); send_char(c); }
   else
     { send_char(27); send_char('['); send_char(c); }
 }

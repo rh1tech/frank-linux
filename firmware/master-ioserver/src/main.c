@@ -130,6 +130,10 @@ static int32_t do_request(const link_blk_req_t *req)
  * engine, the link, and the tty -- without a finger on a key. The alternative
  * was a separate self-test build, which would have proven a binary nobody ships.
  */
+/* Total console bytes taken off the link, for comparison against what the
+ * slave says it sent. */
+static uint32_t console_rx_bytes;
+
 static void keyboard_tick(void)
 {
 #if FRANK_MASTER_HID
@@ -140,11 +144,88 @@ static void keyboard_tick(void)
     while (input_poll(&ev))
         terminal_feed_event(&ev);
 
-    int c = getchar_timeout_us(0);
-    if (c != PICO_ERROR_TIMEOUT && c >= 0) {
-        input_event_t k = { .code = (c == '\r' || c == '\n') ? KEY_ENTER : c };
-        terminal_feed_event(&k);
+    /*
+     * Bytes arriving on the serial line become key events.
+     *
+     * Escape sequences are decoded rather than passed through as three separate
+     * characters, because a terminal on a serial line is expected to: what
+     * comes down the wire from a person's terminal emulator when they press
+     * Down is ESC [ B, and the right response is a Down key, not the letter B.
+     *
+     * It also closes the hole that let application cursor mode go unimplemented
+     * for as long as it did. The harness drives this port, and until now it
+     * could type letters but could not press an arrow -- so the one path with a
+     * mode dependency in it was the one path nothing could test. Feeding the
+     * decoded key through terminal_feed_event() means the harness now exercises
+     * exactly what a keyboard does, DECCKM included.
+     *
+     * A lone ESC still works: if nothing follows within the timeout it is
+     * delivered as itself, which is what dismisses a dialog.
+     */
+    static enum { SEQ_NONE, SEQ_ESC, SEQ_CSI } seq = SEQ_NONE;
+    static absolute_time_t seq_deadline;
+
+    if (seq != SEQ_NONE && absolute_time_diff_us(get_absolute_time(), seq_deadline) < 0) {
+        input_event_t e = { .code = 27 };
+        terminal_feed_event(&e);
+        if (seq == SEQ_CSI) {
+            input_event_t b = { .code = '[' };
+            terminal_feed_event(&b);
+        }
+        seq = SEQ_NONE;
     }
+
+    int c = getchar_timeout_us(0);
+    if (c == PICO_ERROR_TIMEOUT || c < 0)
+        return;
+
+    switch (seq) {
+    case SEQ_NONE:
+        if (c == 27) {
+            seq = SEQ_ESC;
+            seq_deadline = make_timeout_time_ms(50);
+            return;
+        }
+        break;
+
+    case SEQ_ESC:
+        if (c == '[' || c == 'O') {
+            seq = SEQ_CSI;
+            seq_deadline = make_timeout_time_ms(50);
+            return;
+        }
+        /* ESC followed by something else: deliver both. */
+        {
+            input_event_t e = { .code = 27 };
+            terminal_feed_event(&e);
+        }
+        seq = SEQ_NONE;
+        break;
+
+    case SEQ_CSI: {
+        static const struct { char final; int code; } arrows[] = {
+            { 'A', KEY_UP }, { 'B', KEY_DOWN }, { 'C', KEY_RIGHT }, { 'D', KEY_LEFT },
+        };
+        seq = SEQ_NONE;
+        for (unsigned i = 0; i < sizeof(arrows)/sizeof(arrows[0]); i++)
+            if (c == arrows[i].final) {
+                input_event_t k = { .code = arrows[i].code };
+                terminal_feed_event(&k);
+                return;
+            }
+        /* Not an arrow: deliver the pieces so nothing is silently eaten. */
+        {
+            input_event_t e = { .code = 27 };
+            terminal_feed_event(&e);
+            input_event_t b = { .code = '[' };
+            terminal_feed_event(&b);
+        }
+        break;
+    }
+    }
+
+    input_event_t k = { .code = (c == '\r' || c == '\n') ? KEY_ENTER : c };
+    terminal_feed_event(&k);
 }
 
 /*
@@ -237,9 +318,10 @@ int main(void)
             display_tick();
             keyboard_tick();
             if (++spins % 20000000u == 0)
-                printf("RESULT ioserver idle db_in=%u served=%u errors=%u\n",
+                printf("RESULT ioserver idle db_in=%u served=%u errors=%u con_rx=%u\n",
                        (unsigned)link_db_get(&link),
-                       (unsigned)served, (unsigned)errors);
+                       (unsigned)served, (unsigned)errors,
+                       (unsigned)console_rx_bytes);
             continue;
         }
         if (0)
@@ -280,6 +362,12 @@ int main(void)
             } else {
                 for (uint32_t i = 0; i < bytes; i++)
                     terminal_receive_char(xfer[i]);
+                /* Counted so that "the screen is missing pieces" can be told
+                 * apart from "the bytes never arrived". The slave can report
+                 * what it wrote; without this there was nothing to compare it
+                 * against, and every theory about lost output stayed a
+                 * theory. */
+                console_rx_bytes += bytes;
             }
         }
 

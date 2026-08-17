@@ -64,10 +64,10 @@ index ac512116..457a8d0d 100644
  	depends on !BR2_TOOLCHAIN_HAS_THREADS || !BR2_USE_WCHAR
 -	depends on BR2_USE_MMU
 diff --git a/package/mc/mc.mk b/package/mc/mc.mk
-index 9401b8a1..48015674 100644
+index 9401b8a1..4e8485f2 100644
 --- a/package/mc/mc.mk
 +++ b/package/mc/mc.mk
-@@ -10,6 +10,38 @@ MC_SITE = http://ftp.midnight-commander.org
+@@ -10,10 +10,57 @@ MC_SITE = http://ftp.midnight-commander.org
  MC_LICENSE = GPL-3.0+
  MC_LICENSE_FILES = COPYING
  MC_DEPENDENCIES = libglib2 host-pkgconf $(TARGET_NLS_DEPENDENCIES)
@@ -86,17 +86,13 @@ index 9401b8a1..48015674 100644
 +#                         pty. init_subshell_child() does setsid, TIOCSCTTY,
 +#                         tcsetattr, chdir and then execl's the shell -- all
 +#                         syscalls, and after the exec it needs nothing of mc.
-+#                         vfork() would serve. What stops it is that the child
-+#                         allocates before the exec (putenv(g_strdup(...)), and
-+#                         mc_config_get_full_path() on the bash path), and under
-+#                         vfork the heap is the parent's. Hoisting those into
-+#                         the parent would make a subshell possible here.
++#                         What stops it is that the child allocates before the
++#                         exec, and under vfork the heap is the parent's.
 +#
 +# Everything else stays: the panels, the internal viewer and editor, find-file,
-+# and the tar and cpio filesystems, which mc reads in-process rather than by
-+# running a helper. External programs work -- my_systemv() execs them through
-+# posix_spawn (br-external/patches/mc/0001) -- and so do the popen-based paths,
-+# because uClibc's popen() already uses vfork().
++# and the tar and cpio filesystems, which mc reads in-process. External programs
++# work -- my_systemv() execs them through posix_spawn -- and so do the
++# popen-based paths, because uClibc's popen() already uses vfork().
 +MC_CONF_OPTS += \
 +	--without-subshell \
 +	--disable-background \
@@ -106,3 +102,26 @@ index 9401b8a1..48015674 100644
  MC_CONF_ENV = \
  	CFLAGS="$(TARGET_CFLAGS) -std=c99" \
  	LIBS=$(TARGET_NLS_LIBS)
+ 
++# A stack big enough for it.
++#
++# NOMMU has no stack guard page and no growth: the kernel allocates exactly what
++# PT_GNU_STACK asks for, and anything past it lands on whatever is next. The
++# default is 32 kB, which mc overruns during start-up. The symptom is not a
++# stack message but a wild pointer, because the overrun corrupts a saved one:
++#
++#   mc[34]: MPU fault, data access at 0x2a2e2500 (MMFSR 0x82)
++#   Segmentation fault
++#
++# 0x2a2e2500 is the bytes of the string "*.%" -- what a smashed frame looks like
++# when a char* ends up where a pointer was expected.
++#
++# 256 kB rather than nano's 128 kB: mc is several times the program and its
++# find-file and directory scanning recurse. Not free -- on NOMMU this is one
++# contiguous allocation, and large ones fail first as memory fragments -- but a
++# machine with 5.5 MB free can afford it, and an overflow here is silent.
++MC_CONF_ENV += LDFLAGS="$(TARGET_LDFLAGS) -Wl,-z,stack-size=262144"
++
+ ifeq ($(BR2_PACKAGE_GPM),y)
+ MC_CONF_OPTS += --with-gpm-mouse
+ MC_DEPENDENCIES += gpm

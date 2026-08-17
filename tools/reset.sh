@@ -31,9 +31,36 @@ while [ $# -gt 0 ]; do
     shift
 done
 
+# Reset, then make sure the half came back.
+#
+# A plain `reset run` sometimes leaves the slave unreachable: the debug port
+# still answers DPIDR but no memory can be read, which is the F26 signature --
+# the QSPI flash left in a state where XIP returns nothing, so neither core can
+# fetch. Resetting the CPU while the QMI is mid-transaction is one way in.
+#
+# flash.sh has always handled this, because it calls rescue/ensure_arm before
+# writing. reset.sh did not, so a reset that wedged the board left it wedged,
+# and the only way out was a reflash -- eight minutes to recover from a
+# two-second operation. Worse, the wedge looks like whatever was running last,
+# so it kept getting blamed on the software under test.
+#
+# ensure_arm() rescues and re-checks. RESCUE_RESTART resets everything except
+# the DP and RP_AP, which is enough to unstick the flash chip without a power
+# cycle.
 reset_one() {
     local role="$1"
-    oocd "$role" "init" "reset $MODE" "exit" >/dev/null
+    oocd "$role" "init" "reset $MODE" "exit" >/dev/null 2>&1 || true
+
+    if ! arm_reachable "$role"; then
+        echo "==> $role did not come back from reset; rescuing" >&2
+        rescue "$role"
+        arm_reachable "$role" || die "$role: unreachable after rescue.
+       Hold BOOTSEL on that half and power-cycle to recover."
+        # The rescue leaves both cores stopped in the boot ROM, so the reset
+        # that was asked for still has to happen.
+        oocd "$role" "init" "reset $MODE" "exit" >/dev/null 2>&1 || true
+    fi
+
     echo "==> $role reset ($MODE)"
 }
 
